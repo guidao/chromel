@@ -397,7 +397,7 @@ Held j/k use `web-scroll-speed` after the initial step."
                  ("u" . web-scroll-half-page-up) ("<" . web-scroll-to-top)
                  (">" . web-scroll-to-bottom) ("y" . web-copy-url)
                  ("f" . web-copy-link) ("m" . web-follow-multiple)
-                 ("h" . web-history) ("," . web-settings) ("S" . web-save-session) ("R" . web-restore-session)))
+                 ("h" . web-history) ("," . web-settings) ("P" . web-passwords) ("S" . web-save-session) ("R" . web-restore-session)))
   (define-key web-actions-map (kbd (car entry)) (cdr entry)))
 (define-key web-mode-map (kbd "C-c w") web-actions-map)
 
@@ -452,26 +452,36 @@ One native view can occupy only one Emacs window at a time."
 (defun web-settings (&optional url)
   "Open or raise Chromium settings in a separate native window.
 The window shares this plugin's profile with embedded pages.  Optional
-URL selects a chrome://settings subpage; omitted URL preserves the current
-settings page.  Works from any buffer and does not create a browser tab."
+URL selects a chrome://settings or chrome://password-manager page;
+omitted URL preserves the current page.  Works from any buffer and does
+not create a browser tab."
   (interactive)
   (when (and url (not (web--settings-url-p url)))
-    (user-error "Expected a chrome://settings URL"))
+    (user-error "Expected a Chromium settings or password-manager URL"))
   (web--start)
   (web--native-command 0 "settings"
-                       (if url (concat "chrome://settings" (substring url 17)) "")))
+                       (if url
+                           (replace-regexp-in-string
+                            "\\`[^/?#]+://[^/?#]+" #'downcase url t t)
+                         "")))
+
+;;;###autoload
+(defun web-passwords ()
+  "Open Chromium's password manager using this plugin's shared profile."
+  (interactive)
+  (web-settings "chrome://password-manager/"))
 
 (defun web--settings-url-p (url)
-  "Return non-nil if URL belongs to Chromium's settings WebUI."
+  "Return non-nil if URL belongs to the settings or password-manager WebUI."
   (and (stringp url)
        (let ((case-fold-search t))
-         (string-match-p "\\`chrome://settings\\(?:[/?#]\\|\\'\\)" url))))
+         (string-match-p "\\`chrome://\\(?:settings\\|password-manager\\)\\(?:[/?#]\\|\\'\\)" url))))
 
 ;;;###autoload
 (defun web (&optional url background)
   "Open URL in a new browser buffer.
 With BACKGROUND non-nil, leave the selected buffer and keyboard focus alone.
-Settings URLs open a separate settings window and return nil."
+Settings and password-manager URLs open a separate window and return nil."
   (interactive (list (read-string "URL or search: " nil nil web-home-url)))
   (setq url (web--normalize-url (or url web-home-url)))
   (if (web--settings-url-p url)

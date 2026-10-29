@@ -2,9 +2,9 @@
 
 macOS 实验性插件：一个网页对应一个 Emacs buffer，Chromium 视图作为 Emacs 窗口内的 `NSView` 显示。借鉴 Appine 的同进程原生视图方案，使用 CEF 替代 WebKit，不依赖 Qt，也不修改 Emacs 源码或 `Emacs.app`。
 
-**这是浏览器插件的第一版，不是完整 Chrome。** 普通网页使用 Alloy 模式嵌入 Emacs，设置页使用独立的 Chrome-style 窗口。这一版有网页渲染、导航、独立 profile、Chromium 设置页、浏览历史和 DevTools；没有实现密码管理、Chrome Web Store 安装、Chrome 同步、书签管理或下载管理。持久化 Cookie 不等于保存密码。
+**这是浏览器插件的第一版，不是完整 Chrome。** 普通网页使用 Alloy 模式嵌入 Emacs，设置页使用独立的 Chrome-style 窗口。这一版有网页渲染、导航、独立 profile、Chromium 设置页、浏览历史和 DevTools；支持在 Chromium 密码管理页添加凭据并自动填充到内嵌网页；尚未验证首次登录后的保存提示，没有实现 Chrome Web Store 安装、Chrome 同步、书签管理或下载管理。
 
-本次更新改进 `j` / `k` 的长按滚动，涉及原生模块和 renderer Helper。**更新构建后需要退出浏览器所在的 Emacs，再通过 `./scripts/launch.sh` 启动；仅重新加载 `web.el` 不足以更新。** 启动脚本会刷新项目内的独立副本，原来的 `Emacs.app` 不变。
+本次更新接入 Chromium 密码管理入口，涉及原生模块和 Elisp。**更新构建后需要退出浏览器所在的 Emacs，再通过 `./scripts/launch.sh` 启动；仅重新加载 `web.el` 不足以更新。** 启动脚本会刷新项目内的独立副本，原来的 `Emacs.app` 不变。
 
 `X` 恢复关闭页面、会话自动保存和延迟恢复仍可使用。
 键位已对齐 Vimium：`g` 刷新改为 `r`，`G` 改为滚动到底部，`b` 后退改为 `H`，`F` 改为后台打开链接。
@@ -99,6 +99,7 @@ EMACS_INCLUDE_DIR=/path/to/emacs/include ./scripts/build.sh
 | `q` | 隐藏当前网页窗口，保留 buffer |
 | `C-x k` | 用 Emacs 的 buffer 关闭命令关闭网页 |
 | `C-c w ,` / `M-x web-settings` | 打开或切回独立的 Chromium 设置窗口 |
+| `C-c w P` / `M-x web-passwords` | 打开 Chromium 密码管理页 |
 | `M-x web-diagnostics` | 查看 CEF 版本、profile 路径及浏览器数量 |
 
 页面切换包含已加载网页和等待加载的会话标签；`gt` / `gT` 的顺序不随最近访问顺序改变。`t`、`O` 和切换页面命令在当前 Emacs 窗口显示目标页面并保留命令焦点。`o` / `O` 使用 Emacs minibuffer 和历史 URL 补全，尚未实现 Vimium 的书签混合搜索。`p` / `P` 与 Emacs 的 yank 一样，通过 `current-kill` 遵循个人剪贴板设置。
@@ -131,9 +132,21 @@ Meow 用户：`web-mode` 默认使用 **motion** 状态，浏览器键位定义�
 
 已通过实际设置页面的 API 验证：更改默认字号会立即影响使用默认字号的嵌入网页，退出并重启后继续生效。网站自行指定字号时可能看不到变化。设置窗口使用 Chromium 自己的鼠标和快捷键，不使用网页 buffer 的 Vimium / Meow 键位。
 
-设置页面中的项目不代表所有 Chrome 产品功能都已接入。Google 账号同步、密码保存/填充、扩展安装等仍需分别实现和验证。Chromium 的启动页、搜索引擎等选项也不会替代 Elisp 的 `web-home-url`、Emacs 搜索入口和会话管理。
+设置页面中的项目不代表所有 Chrome 产品功能都已接入。Google 账号同步、首次登录后的密码保存提示、扩展安装等仍需分别实现和验证。Chromium 的启动页、搜索引擎等选项也不会替代 Elisp 的 `web-home-url`、Emacs 搜索入口和会话管理。
 
 更新原生模块后需要退出承载浏览器的 Emacs，再通过 `./scripts/launch.sh` 启动；仅重新加载 `web.el` 不够。
+
+## 密码管理与自动填充
+
+执行 `M-x web-passwords`，或在网页 buffer 中按 `C-c w P`，打开真实的 `chrome://password-manager/`。也可以通过 `o` / `O` 输入该地址。它与设置页复用同一个独立窗口，与内嵌网页共享本插件的 profile，不读取日常 Google Chrome 的密码库。
+
+1. 在密码管理页点击添加密码，填写网站、用户名和密码。
+2. 返回 Emacs，打开或重新加载该网站的登录页。
+3. 点击登录输入框，Chromium 负责识别和填充；密码管理窗口关闭后仍可使用。
+
+已在 CEF 156 的真实内嵌 Alloy 页面上验证：原生密码库保存、账号/密码自动填充、可信点击后填充值可用、关闭管理窗口后填充、重启 Emacs 后继续填充，以及另一个主机名不误填。凭据由 Chromium 管理，不写入 Elisp 历史或会话文件，也不由插件脚本向网页注入密码。
+
+当前验证的是“在管理页手动添加 → 网页自动填充”。首次网站登录后是否显示保存/更新密码提示、多个账号的选择弹层、复杂网站表单及 Google 账号同步尚未验证。自动化测试使用临时 profile、虚构账号和 mock keychain；日常运行使用系统钥匙串，系统授权和真实站点仍需人工验收。
 
 ## 用键盘操作链接和控件
 
@@ -221,7 +234,7 @@ web/
 - 历史由 Elisp 从成功加载事件记录，使用 JSON 和原子替换保存，不依赖 `chrome://history`。
 - 点击打开新窗口的链接会转成新 Emacs buffer。第一版不保留 `window.opener` 关系，依赖脚本弹窗通信的登录流程可能不兼容。
 - 页面关闭会强制完成，暂不提供 `beforeunload` 的“未保存内容”确认。
-- 没有实现密码自动填充、扩展商店和下载管理。Chromium 设置页已接入，但权限提示和其他浏览器功能仍需逐项验证。不能用 CEF 的网页兼容性推断这些 Chrome 产品功能可用。
+- 已验证手动添加凭据后的原生密码自动填充；扩展商店和下载管理尚未实现。Chromium 设置页已接入，但权限提示和其他浏览器功能仍需逐项验证。不能用 CEF 的网页兼容性推断这些 Chrome 产品功能可用。
 - CEF helper 保持 Chromium 沙箱开启，没有添加 `--no-sandbox` 或绕过证书校验的参数。
 - 目前支持 NS/Cocoa Emacs，不支持终端 Emacs、Linux、GNUstep 或 emacs-mac port。
 
@@ -250,6 +263,7 @@ web/
 - Vimium 键位 GUI 回归：实际按键序列驱动 `gg/G`、`F` 后台打开、`t/J/K/gt/gT/T/^/x`，检查 Emacs 命令焦点与原生视图关闭。
 - 消息循环回归：测试探针检查原生 `web::pump` 调用栈内是否重新进入 `NSApp.run`，覆盖持续绘制及 60 步页面创建、切换、隐藏和关闭；探针只加载到隔离测试进程。
 
+- 密码回归：原生密码管理 API 添加虚构账号、内嵌 Alloy 表单自动填充、可信点击、关闭管理窗口、跨主机名不误填、两个独立 Emacs 进程间持久化。
 - 设置窗口回归：真实 WebUI 加载、Chrome runtime、共享 request context、窗口复用、独立关闭/重开、字号设置影响嵌入网页、跨进程持久化及退出时关闭设置窗口。
 
 尚未完成人工验收：中文输入法、真实键盘快捷键组合、多显示器不同缩放比、Spaces/全屏切换、复杂站点弹窗登录。几何与生命周期测试通过不代表这些场景已经验证。
@@ -283,7 +297,7 @@ TEST_PROFILE="$(mktemp -d)"
 build/WebRuntime.app/Contents/MacOS/WebRuntime --smoke-test "$TEST_PROFILE"
 ```
 
-该命令使用专用临时目录，测试后可删除。`WebRuntime.app` 本身不是日常浏览器入口。自动化测试只对临时 profile 设置 `WEB_CEF_TEST_MODE=1`，使用 Chromium 的 mock keychain；日常运行不使用它。测试验证站点持久化，但不验证系统钥匙串授权、真实网站登录或密码自动填充。
+该命令使用专用临时目录，测试后可删除。`WebRuntime.app` 本身不是日常浏览器入口。自动化测试只对临时 profile 设置 `WEB_CEF_TEST_MODE=1`，使用 Chromium 的 mock keychain；日常运行不使用它。测试验证站点及密码持久化和本地表单自动填充，不验证系统钥匙串授权、真实网站登录或首次登录保存提示。
 
 如果遇到 `Invalid or prematurely-freed autorelease pool` 并伴随 `abort trap`，需检查 macOS 崩溃报告。本项目在 2026-10-29 捕获到的调用链是 `web::pump → CEF → EmacsApp run → NSApplication run → NSAutoreleasePool drain`。旧模块的隔离测试也确认 CEF pump 会重新进入 `NSApp.run`。修复使用 CEF external message pump，并提供 browser process handler，避免 CEF 回退到默认 Cocoa 消息循环。`M-x web-diagnostics` 应显示 `Message pump: external (Emacs timer)`。这针对已定位的循环重入路径，不代表所有 GPU 或 frame 超时问题都已解决；这些日志需要结合显示异常和独立堆栈分析。
 

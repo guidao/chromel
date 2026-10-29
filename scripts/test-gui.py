@@ -48,6 +48,8 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             body = b"""<!doctype html><style>body{height:2000px;margin:0}</style><p>NeedleFeature in frame</p><script>function report(){parent.postMessage({y:scrollY,height:innerHeight,max:document.scrollingElement.scrollHeight-innerHeight},'*')}addEventListener('scroll',report);addEventListener('load',report);addEventListener('resize',report);</script>"""
         elif self.path.startswith('/feature-target/'):
             body = ('<!doctype html><title>feature-target-' + self.path.rsplit('/',1)[-1] + '</title>Opened').encode()
+        elif self.path == '/passwords':
+            body = (root / 'test/passwords.html').read_bytes()
         elif self.path == '/controls':
             body = (root / 'test/controls.html').read_bytes()
         elif self.path.startswith('/scroll'):
@@ -91,8 +93,10 @@ try:
                                  ("session-seed", "gui-session.el"),
                                  ("session-restore", "gui-session.el"),
                                  ("settings-seed", "gui-settings.el"),
-                                 ("settings-restore", "gui-settings.el")]:
-            route = {'gui-features.el': '/features', 'gui-controls.el': '/controls', 'gui-scroll.el': '/scroll', 'gui-hold.el': '/scroll',
+                                 ("settings-restore", "gui-settings.el"),
+                                 ("password-seed", "gui-passwords.el"),
+                                 ("password-restore", "gui-passwords.el")]:
+            route = {'gui-passwords.el': '/passwords', 'gui-features.el': '/features', 'gui-controls.el': '/controls', 'gui-scroll.el': '/scroll', 'gui-hold.el': '/scroll',
                      'gui-scroll-modal.el': '/scroll-modal'}.get(script, '/fixture')
             test_url = url.replace('/fixture', route)
             result = pathlib.Path(temp) / "result"
@@ -102,6 +106,8 @@ try:
                        WEB_TEST_URL=test_url, WEB_TEST_EXPECT_TITLE=expected)
             if script == "gui-settings.el":
                 env["WEB_TEST_SETTINGS_PHASE"] = expected.removeprefix("settings-")
+            if script == "gui-passwords.el":
+                env["WEB_TEST_PASSWORD_PHASE"] = expected.removeprefix("password-")
             if script == "gui-session.el":
                 env["WEB_TEST_SESSION_PHASE"] = expected.removeprefix("session-")
             if script == "gui-escape.el":
@@ -130,7 +136,7 @@ try:
                 print(f"FAIL: GUI process exited ({status}) without a test result")
             if status:
                 raise SystemExit(status)
-            if script == "gui-settings.el":
+            if script in ("gui-settings.el", "gui-passwords.el"):
                 assert "Web: skipping CefShutdown" not in log.read_text(), "Settings prevented clean CEF shutdown"
             history = json.loads((pathlib.Path(temp) / "profile/history.json").read_text())
             assert any(entry["url"] == test_url for entry in history), "History was not saved"

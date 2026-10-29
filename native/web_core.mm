@@ -442,12 +442,14 @@ class SettingsWindowDelegate final : public CefWindowDelegate {
 };
 
 bool isSettingsURL(const std::string& url) {
-  return url == "chrome://settings" || url.starts_with("chrome://settings/") ||
+  return url == "chrome://password-manager" || url.starts_with("chrome://password-manager/") ||
+    url.starts_with("chrome://password-manager?") || url.starts_with("chrome://password-manager#") ||
+    url == "chrome://settings" || url.starts_with("chrome://settings/") ||
     url.starts_with("chrome://settings?") || url.starts_with("chrome://settings#");
 }
 void openSettings(const std::string& requested) {
   const auto url = requested.empty() ? std::string("chrome://settings/") : requested;
-  if (!isSettingsURL(url)) throw std::runtime_error("Expected a chrome://settings URL");
+  if (!isSettingsURL(url)) throw std::runtime_error("Expected a Chromium settings or password-manager URL");
   if (settingsClosing) throw std::runtime_error("Settings window is closing; try again shortly");
   if (!settingsBrowser) {
     CefBrowserSettings settings;

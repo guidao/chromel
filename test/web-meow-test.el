@@ -24,7 +24,7 @@
                     ("o" . web-open) ("O" . web-open-new-url)
                     ("ge" . web-open-url) ("gE" . web-edit-url-new-buffer)
                     ("t" . web-new-tab) ("x" . web-close-tab) ("X" . web-reopen-closed-tab)
-                    ("C-c w ," . web-settings) ("C-c w S" . web-save-session) ("C-c w R" . web-restore-session)
+                    ("C-c w ," . web-settings) ("C-c w P" . web-passwords) ("C-c w S" . web-save-session) ("C-c w R" . web-restore-session)
                     ("J" . web-previous-tab) ("K" . web-next-tab)
                     ("gT" . web-previous-tab) ("gt" . web-next-tab)
                     ("T" . web-switch-tab) ("^" . web-last-tab)
