@@ -47,8 +47,14 @@ Do not point this at a Chrome profile.  Restart Emacs after changing it."
 (defcustom web-scroll-duration 140
   "Approximate smooth scrolling duration in milliseconds.
 Set to zero for instant scrolling.  The system reduced-motion preference
-also disables animation.  Repeated commands accumulate their distance."
+also disables animation.  Separate commands accumulate their distance.
+Held j/k use `web-scroll-speed` after the initial step."
   :type 'natnum)
+
+(defcustom web-scroll-speed 900
+  "Continuous j/k scrolling speed in CSS pixels per second."
+  :type 'natnum)
+(defvar-local web--scroll-settings nil)
 
 (declare-function web--native-init "web-module" (bundle profile))
 (declare-function web--native-bind "web-module" (title))
@@ -198,6 +204,10 @@ also disables animation.  Repeated commands accumulate their distance."
            (with-current-buffer buffer
              (let ((win (web--display-window buffer)))
                (setq web--window win)
+               (let ((settings (list web-scroll-step web-scroll-duration web-scroll-speed)))
+                 (unless (equal settings web--scroll-settings)
+                   (web--native-command id "scroll-settings" (web--json (vconcat settings)))
+                   (setq web--scroll-settings settings)))
                ;; Cocoa may consume Escape before Emacs keymaps see it.  Tell
                ;; the native event router which buffer owns command input.
                (web--native-command id "selected"
@@ -328,11 +338,14 @@ also disables animation.  Repeated commands accumulate their distance."
     ;; Let Emacs dispatch Cocoa events between close requests and CefShutdown.
     ;; Blocking inside the native shutdown loop alone can leave AppKit window
     ;; teardown pending and skip CEF's profile flush when tabs are still open.
+    (web--native-command 0 "close-settings" "")
     (dolist (buffer (web--buffers))
       (with-current-buffer buffer (ignore-errors (web--kill-buffer))))
     (let ((deadline (+ (float-time) 3)))
       (while (and (< (float-time) deadline)
-                  (not (string-match-p "Browsers including DevTools: 0" (web--native-info))))
+                  (let ((info (web--native-info)))
+                    (not (and (string-match-p "Browsers including DevTools: 0" info)
+                              (string-match-p "Settings windows: 0" info)))))
         (web--native-pump)
         (accept-process-output nil 0.01)))
     (web--native-shutdown)))
@@ -384,7 +397,7 @@ also disables animation.  Repeated commands accumulate their distance."
                  ("u" . web-scroll-half-page-up) ("<" . web-scroll-to-top)
                  (">" . web-scroll-to-bottom) ("y" . web-copy-url)
                  ("f" . web-copy-link) ("m" . web-follow-multiple)
-                 ("h" . web-history) ("S" . web-save-session) ("R" . web-restore-session)))
+                 ("h" . web-history) ("," . web-settings) ("S" . web-save-session) ("R" . web-restore-session)))
   (define-key web-actions-map (kbd (car entry)) (cdr entry)))
 (define-key web-mode-map (kbd "C-c w") web-actions-map)
 
@@ -436,27 +449,50 @@ One native view can occupy only one Emacs window at a time."
       (puthash id (current-buffer) web--pages))))
 
 ;;;###autoload
+(defun web-settings (&optional url)
+  "Open or raise Chromium settings in a separate native window.
+The window shares this plugin's profile with embedded pages.  Optional
+URL selects a chrome://settings subpage; omitted URL preserves the current
+settings page.  Works from any buffer and does not create a browser tab."
+  (interactive)
+  (when (and url (not (web--settings-url-p url)))
+    (user-error "Expected a chrome://settings URL"))
+  (web--start)
+  (web--native-command 0 "settings"
+                       (if url (concat "chrome://settings" (substring url 17)) "")))
+
+(defun web--settings-url-p (url)
+  "Return non-nil if URL belongs to Chromium's settings WebUI."
+  (and (stringp url)
+       (let ((case-fold-search t))
+         (string-match-p "\\`chrome://settings\\(?:[/?#]\\|\\'\\)" url))))
+
+;;;###autoload
 (defun web (&optional url background)
   "Open URL in a new browser buffer.
-With BACKGROUND non-nil, leave the selected buffer and keyboard focus alone."
+With BACKGROUND non-nil, leave the selected buffer and keyboard focus alone.
+Settings URLs open a separate settings window and return nil."
   (interactive (list (read-string "URL or search: " nil nil web-home-url)))
-  (web--start)
-  (let (buffer)
-    (let ((web--session-inhibit t))
-      (condition-case err
-          (progn
-            (setq buffer (web--make-tab (web--normalize-url (or url web-home-url)) "Browser"))
-            (unless background (pop-to-buffer buffer))
-            (with-current-buffer buffer
-              (web--ensure-browser)
-              (web--sync)
-              (unless (or background (active-minibuffer-window)) (web-focus)))
-            (unless background (setq web--last-selected-tab buffer)))
-        ((error quit)
-         (when (buffer-live-p buffer) (kill-buffer buffer))
-         (signal (car err) (cdr err)))))
-    (web--session-changed)
-    buffer))
+  (setq url (web--normalize-url (or url web-home-url)))
+  (if (web--settings-url-p url)
+      (progn (web-settings url) nil)
+    (web--start)
+    (let (buffer)
+      (let ((web--session-inhibit t))
+        (condition-case err
+            (progn
+              (setq buffer (web--make-tab url "Browser"))
+              (unless background (pop-to-buffer buffer))
+              (with-current-buffer buffer
+                (web--ensure-browser)
+                (web--sync)
+                (unless (or background (active-minibuffer-window)) (web-focus)))
+              (unless background (setq web--last-selected-tab buffer)))
+          ((error quit)
+           (when (buffer-live-p buffer) (kill-buffer buffer))
+           (signal (car err) (cdr err)))))
+      (web--session-changed)
+      buffer)))
 
 (defun web--command (action &optional argument)
   (web--ensure-browser)
@@ -466,7 +502,10 @@ With BACKGROUND non-nil, leave the selected buffer and keyboard focus alone."
 (defun web-open-url (url)
   "Navigate the current browser to URL."
   (interactive (list (read-string "URL or search: " web--url)))
-  (web--command "navigate" (web--normalize-url url)))
+  (setq url (web--normalize-url url))
+  (if (web--settings-url-p url)
+      (web-settings url)
+    (web--command "navigate" url)))
 (defvar web-url-history nil)
 
 (defun web--read-url (&optional initial)
@@ -506,7 +545,8 @@ With BACKGROUND non-nil, leave the selected buffer and keyboard focus alone."
 (defun web-open-new-url (url)
   "Open URL in a new selected browser buffer, retaining command focus."
   (interactive (list (web--read-url)))
-  (web--select-buffer (web url t)))
+  (when-let* ((buffer (web url t)))
+    (web--select-buffer buffer)))
 
 (defun web-edit-url-new-buffer (url)
   "Edit this page's address and open URL in a new browser buffer."
@@ -598,34 +638,34 @@ command focus so j/k operate on the new target."
   (interactive)
   (web-focus-parent-frame t))
 
-(defun web--scroll (steps &optional frame mode)
-  "Scroll STEPS in FRAME or the focused frame, using optional MODE."
-  (unless (natnump web-scroll-step)
-    (user-error "web-scroll-step must be a nonnegative integer"))
-  (unless (natnump web-scroll-duration)
-    (user-error "web-scroll-duration must be a nonnegative integer"))
-  (let ((script (with-temp-buffer
-                  (let ((coding-system-for-read 'utf-8-unix))
-                    (insert-file-contents (expand-file-name "native/scroll.js" web--directory)))
-                  (buffer-string))))
-    (setq script (format "%s(%d,%d,%s);" script
-                         (if (or (null mode) (equal mode "pixels")) (* steps web-scroll-step) steps)
-                         web-scroll-duration (web--json (or mode "pixels"))))
-    (if frame
-        (web--command "javascript-frame" (web--json (list :frame frame :script script)))
-      (web--command "javascript-focused" script))))
+(defun web--scroll (steps &optional frame mode held)
+  "Scroll STEPS in FRAME or the focused frame, using optional MODE.
+HELD permits physical j/k hold tracking after the Emacs keymap chose scrolling."
+  (unless (and (natnump web-scroll-step) (natnump web-scroll-duration)
+               (natnump web-scroll-speed))
+    (user-error "Scroll step, duration and speed must be nonnegative integers"))
+  (web--command "scroll"
+                (web--json (list :amount (if (or (null mode) (equal mode "pixels"))
+                                             (* steps web-scroll-step) steps)
+                                 :duration web-scroll-duration :speed web-scroll-speed
+                                 :mode (or mode "pixels") :frame (or frame "")
+                                 :held (if held t :false)))))
 
 (defun web-scroll-down (&optional count)
   "Scroll the page down COUNT steps, keeping Emacs command focus.
 Use the focused frame, including cross-origin iframes.  Scroll a focused
 control's scrollable ancestor first, then that frame's page."
   (interactive "p")
-  (web--scroll (or count 1)))
+  (web--scroll (or count 1) nil nil
+               (and (called-interactively-p 'any) (not current-prefix-arg)
+                    (equal (this-command-keys-vector) [106]))))
 
 (defun web-scroll-up (&optional count)
   "Scroll the page up COUNT steps, keeping Emacs command focus."
   (interactive "p")
-  (web--scroll (- (or count 1))))
+  (web--scroll (- (or count 1)) nil nil
+               (and (called-interactively-p 'any) (not current-prefix-arg)
+                    (equal (this-command-keys-vector) [107]))))
 
 (defun web--json (object)
   "Serialize OBJECT as JSON text suitable for the native UTF-8 interface."

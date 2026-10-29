@@ -2,12 +2,11 @@
 
 macOS 实验性插件：一个网页对应一个 Emacs buffer，Chromium 视图作为 Emacs 窗口内的 `NSView` 显示。借鉴 Appine 的同进程原生视图方案，使用 CEF 替代 WebKit，不依赖 Qt，也不修改 Emacs 源码或 `Emacs.app`。
 
-**这是浏览器插件的第一版，不是完整 Chrome。** CEF 在 macOS 使用 `parent_view` 嵌入时会进入 Alloy 模式。这一版有网页渲染、导航、独立 profile、浏览历史和 DevTools；没有实现密码管理、Chrome Web Store 安装、Chrome 同步、书签管理或下载管理。持久化 Cookie 不等于保存密码。
+**这是浏览器插件的第一版，不是完整 Chrome。** 普通网页使用 Alloy 模式嵌入 Emacs，设置页使用独立的 Chrome-style 窗口。这一版有网页渲染、导航、独立 profile、Chromium 设置页、浏览历史和 DevTools；没有实现密码管理、Chrome Web Store 安装、Chrome 同步、书签管理或下载管理。持久化 Cookie 不等于保存密码。
 
-本次新增 `X` 恢复关闭页面、会话自动保存和延迟恢复，只涉及 Elisp。已有实例用 `M-x load-file` 加载本项目的 `web.el` 即可，当前打开的网页也会纳入会话保存。
+本次更新改进 `j` / `k` 的长按滚动，涉及原生模块和 renderer Helper。**更新构建后需要退出浏览器所在的 Emacs，再通过 `./scripts/launch.sh` 启动；仅重新加载 `web.el` 不足以更新。** 启动脚本会刷新项目内的独立副本，原来的 `Emacs.app` 不变。
 
-此前的原生消息循环修复仍要求重启一次；如果尚未重启，请先退出浏览器所在的 Emacs，再通过 `./scripts/launch.sh` 启动。
-
+`X` 恢复关闭页面、会话自动保存和延迟恢复仍可使用。
 键位已对齐 Vimium：`g` 刷新改为 `r`，`G` 改为滚动到底部，`b` 后退改为 `H`，`F` 改为后台打开链接。
 
 ## 开始使用
@@ -99,6 +98,7 @@ EMACS_INCLUDE_DIR=/path/to/emacs/include ./scripts/build.sh
 | `M-x web-stop` | 停止加载 |
 | `q` | 隐藏当前网页窗口，保留 buffer |
 | `C-x k` | 用 Emacs 的 buffer 关闭命令关闭网页 |
+| `C-c w ,` / `M-x web-settings` | 打开或切回独立的 Chromium 设置窗口 |
 | `M-x web-diagnostics` | 查看 CEF 版本、profile 路径及浏览器数量 |
 
 页面切换包含已加载网页和等待加载的会话标签；`gt` / `gT` 的顺序不随最近访问顺序改变。`t`、`O` 和切换页面命令在当前 Emacs 窗口显示目标页面并保留命令焦点。`o` / `O` 使用 Emacs minibuffer 和历史 URL 补全，尚未实现 Vimium 的书签混合搜索。`p` / `P` 与 Emacs 的 yank 一样，通过 `current-kill` 遵循个人剪贴板设置。
@@ -109,9 +109,31 @@ EMACS_INCLUDE_DIR=/path/to/emacs/include ./scripts/build.sh
 
 在选中的 frame 内，从页面初始化时开始记录点击与焦点，优先滚动最近操作区域，到达边界后寻找该文档内的外层滚动区域。可见的原生 dialog、popover 和 ARIA 对话框优先限定滚动范围；外页被锁定时，会寻找弹层内可滚动的面板，并通过实际位移确认能否滚动。点击文字滚出可视区后仍保留其可见滚动容器。暂不跨 iframe 边界向父文档传递滚动。滚动保留原有的 Emacs 或网页键盘焦点。
 
-默认使用按帧平滑动画，`web-scroll-duration` 为约 140 毫秒。连续按键累计目标距离，反向按键取消原方向尚未完成的距离；鼠标滚轮、触摸或点击会打断动画。设置为 `0` 可恢复即时滚动，系统“减少动态效果”偏好也会关闭动画。这是对键盘滚动的平滑处理，没有完整复刻 Vimium 的按住/松开按键速度校准。
+点按使用约 140 毫秒的平滑动画，由 `web-scroll-duration` 控制；分开的多次点按累计距离。长按使用同一个逐帧动画，短暂过渡后按 `web-scroll-speed` 持续移动，默认 900 CSS 像素/秒，不再依靠系统重复按键追加距离。长按松开即停；很短的点按仍会完成一次步长。反向按键取消旧方向的剩余距离；切换 buffer、窗口失去焦点、滚轮、触摸或点击会停止滚动。
+
+可以分别调整点按距离和长按速度：
+
+```elisp
+(setq web-scroll-step 60
+      web-scroll-speed 900
+      web-scroll-duration 140)
+```
+
+`web-scroll-duration` 设为 `0` 或启用系统“减少动态效果”时，使用按键重复驱动的即时滚动。Emacs 中的数字前缀、程序调用和没有对应物理按键的键盘宏继续按指定距离滚动。Meow 先决定按键绑定；只有 `j` / `k` 实际触发滚动命令后，原生层才接管这一次长按的重复事件和松键。
 
 Meow 用户：`web-mode` 默认使用 **motion** 状态，浏览器键位定义在 `web-mode-map` 中，`SPC` 继续进入 Meow keypad。只将 `meow-next` / `meow-prev` 局部重映射为网页滚动，以适配常见的 motion `j` / `k` 配置；不修改 Meow 的共享键位或其他 buffer。支持先加载 Meow 或先加载 web；若你在 `meow-mode-state-list` 明确设置了 `web-mode` 的状态，会保留该设置。个人额外定义的 motion 按键仍优先于 major mode。
+
+## Chromium 设置
+
+执行 `M-x web-settings`，或在网页 buffer 中按 `C-c w ,`，打开真实的 `chrome://settings/` 页面。用 `o` / `O` 输入该地址也会打开设置窗口；支持 `chrome://settings/fonts`、`chrome://settings/languages` 等子页面。普通网页仍嵌入 Emacs。
+
+设置使用 CEF `CefWindow` / `CefBrowserView` 管理的独立 Chrome-style 原生窗口，与嵌入网页共享本插件的 CEF request context 和 profile，不使用你日常 Google Chrome 的个人资料。重复执行 `web-settings` 会切回已有窗口并保留当前子页面；显式输入设置地址则导航到指定页面。设置窗口不计入 Emacs 标签、浏览历史或会话恢复；可以独立关闭，退出 Emacs 时也会关闭并保存配置。
+
+已通过实际设置页面的 API 验证：更改默认字号会立即影响使用默认字号的嵌入网页，退出并重启后继续生效。网站自行指定字号时可能看不到变化。设置窗口使用 Chromium 自己的鼠标和快捷键，不使用网页 buffer 的 Vimium / Meow 键位。
+
+设置页面中的项目不代表所有 Chrome 产品功能都已接入。Google 账号同步、密码保存/填充、扩展安装等仍需分别实现和验证。Chromium 的启动页、搜索引擎等选项也不会替代 Elisp 的 `web-home-url`、Emacs 搜索入口和会话管理。
+
+更新原生模块后需要退出承载浏览器的 Emacs，再通过 `./scripts/launch.sh` 启动；仅重新加载 `web.el` 不够。
 
 ## 用键盘操作链接和控件
 
@@ -199,7 +221,7 @@ web/
 - 历史由 Elisp 从成功加载事件记录，使用 JSON 和原子替换保存，不依赖 `chrome://history`。
 - 点击打开新窗口的链接会转成新 Emacs buffer。第一版不保留 `window.opener` 关系，依赖脚本弹窗通信的登录流程可能不兼容。
 - 页面关闭会强制完成，暂不提供 `beforeunload` 的“未保存内容”确认。
-- 没有实现密码自动填充、扩展商店、下载管理、权限管理界面。不能用 CEF 的网页兼容性推断这些 Chrome 产品功能可用。
+- 没有实现密码自动填充、扩展商店和下载管理。Chromium 设置页已接入，但权限提示和其他浏览器功能仍需逐项验证。不能用 CEF 的网页兼容性推断这些 Chrome 产品功能可用。
 - CEF helper 保持 Chromium 沙箱开启，没有添加 `--no-sandbox` 或绕过证书校验的参数。
 - 目前支持 NS/Cocoa Emacs，不支持终端 Emacs、Linux、GNUstep 或 emacs-mac port。
 
@@ -207,7 +229,7 @@ web/
 
 本机已通过（2026-10-29，Apple Silicon / Emacs 32.0.50 / 锁定的 CEF 156）：
 
-- 34 项 ERT 测试及无警告 Elisp 字节编译，包括中文历史记录、标签输入、取消清理、控件激活、过期回复、页面创建顺序/MRU 切换、关闭取消和剪贴板入口。
+- 35 项 ERT 测试及无警告 Elisp 字节编译，包括中文历史记录、标签输入、取消清理、控件激活、过期回复、页面创建顺序/MRU 切换、关闭取消和剪贴板入口。
 - 会话测试覆盖关闭位置、取消关闭、延迟创建、失败重试、中文编码、原子写失败、损坏文件保护、退出保存和上一份备份。
 - 两个独立 GUI 进程验证会话恢复：3 个标签最初只创建 1 个 CEF 浏览器，普通 buffer 切换才加载下一页，并验证 `X` 和共享 profile。
 - 2 项真实 Meow 集成测试，覆盖两种加载顺序：motion 默认状态、Vimium 键位、局部 j/k、SPC keypad 和其他 buffer 不受影响。
@@ -218,6 +240,7 @@ web/
 - 真实控件交互：可信 pointer/mouse 点击事件、JS/ARIA 按钮、嵌套控件与 label 去重、独立按钮保留、点击后命令焦点、表单焦点与光标、复选框、单选框、自定义 label、折叠区、禁用过滤、SPA 链接拦截、弹窗和模态对话框。
 - `j` / `k` 实际页面滚动、数字前缀与连续滚动、内层区域滚动及边界向外层传递、命令焦点保留。
 - 启用 Meow 的 GUI 实例：同域、跨域和两层嵌套 iframe 焦点路由、键盘返回上一层/最外层、平滑滚动中间帧、累计距离、反向响应、滚轮打断和即时滚动模式。
+- 长按回归：没有重复事件也持续滚动、密集重复不累计拖尾、松键停止、按住时反向与旧按键释放隔离、Meow 分发和自定义键位优先、跨域多层 iframe、选中状态取消、即时/减少动态效果模式；采样 renderer 动画帧检查稳定阶段的速度。
 - Cocoa `Esc` 事件在网页输入框和 Emacs/Meow 命令状态下等价于 `C-g`，不传给网页，并保持 Emacs `fullboth` 全屏状态。
 - Cocoa 键盘事件驱动的 `j` / `k`：内页保持网页焦点、首次点击非输入面板、长外页锁定时的原生/ARIA 弹层滚动、弹层关闭后恢复外页、输入框/contenteditable/select 正常输入。
 
@@ -226,6 +249,8 @@ web/
 - 链接复制和连续打开：过滤按钮/隐藏链接、编码地址、复制不点击、真实点击处理、阻止跳转、后台隐藏/焦点保留、取消清理。
 - Vimium 键位 GUI 回归：实际按键序列驱动 `gg/G`、`F` 后台打开、`t/J/K/gt/gT/T/^/x`，检查 Emacs 命令焦点与原生视图关闭。
 - 消息循环回归：测试探针检查原生 `web::pump` 调用栈内是否重新进入 `NSApp.run`，覆盖持续绘制及 60 步页面创建、切换、隐藏和关闭；探针只加载到隔离测试进程。
+
+- 设置窗口回归：真实 WebUI 加载、Chrome runtime、共享 request context、窗口复用、独立关闭/重开、字号设置影响嵌入网页、跨进程持久化及退出时关闭设置窗口。
 
 尚未完成人工验收：中文输入法、真实键盘快捷键组合、多显示器不同缩放比、Spaces/全屏切换、复杂站点弹窗登录。几何与生命周期测试通过不代表这些场景已经验证。
 
@@ -288,9 +313,9 @@ CEF 要求 `NSApplication` 实现 `CefAppProtocol`。模块给 Emacs 的 applica
 
 CEF 使用 [external message pump](https://github.com/chromiumembedded/cef/blob/master/libcef/browser/browser_message_loop.cc)，由 Emacs 主线程的 20 毫秒定时器调用 `CefDoMessageLoopWork`。必须同时设置 `external_message_pump` 并提供 `CefBrowserProcessHandler`；只有设置开关时 CEF 仍可能回退到默认循环。`OnScheduleMessagePumpWork` 的请求由已有的周期定时器合并处理，不从可能位于工作线程的回调进入 Lisp 或 Cocoa。CEF 处理自己的任务，Cocoa 事件继续由 Emacs 分发，避免在 Lisp 定时器内重新执行 `NSApp.run`。
 
-CEF 回调只写事件队列，由 Elisp 定时读取，回调中不重入 Lisp。页内查找使用 `CefBrowserHost::Find` 和 `CefFindHandler`，查询串行发起、按 token 接收结果，直到最终回调；停止时清除高亮。当前版本首次查找先重置会话，再请求选中匹配，避免只统计而不定位。网页聚焦时通过 CEF 键盘回调识别非输入控件的 `j` / `k`，同时记录 frame ID；Elisp 处理事件后把滚动脚本发回该 frame，避免事件排队期间焦点变化导致滚错页面。
+CEF 回调只写事件队列，由 Elisp 定时读取，回调中不重入 Lisp。页内查找使用 `CefBrowserHost::Find` 和 `CefFindHandler`，查询串行发起、按 token 接收结果，直到最终回调；停止时清除高亮。当前版本首次查找先重置会话，再请求选中匹配，避免只统计而不定位。网页聚焦时通过 CEF 键盘回调识别非输入控件的 `j` / `k`，直接向当时聚焦的 frame 发送小型滚动调用，不再绕经 Lisp 事件队列。Emacs 命令状态仍通过 Elisp 键位选择滚动命令，再由原生层确认对应的物理按键仍按住。Cocoa 的 keyup、窗口失焦和页面隐藏会结束持续滚动；松键发送到开始滚动时记录的 frame，跨域 iframe 不需要访问父页面 DOM。
 
-滚动实现参考 [Vimium scroller](https://github.com/philc/vimium/blob/5aa29614bf1dce05e0d316f8c38722e17f9b38c3/content_scripts/scroller.js) 和 [所有 frame 的初始化配置](https://github.com/philc/vimium/blob/5aa29614bf1dce05e0d316f8c38722e17f9b38c3/manifest.json)：尽早跟踪激活元素、实测滚动能力、寻找可见主要滚动容器。Vimium 还包含特定站点的目标选择和更完整的按住/松开速度处理；当前实现尚不等价于安装 Vimium 扩展。
+滚动实现参考 [Vimium scroller](https://github.com/philc/vimium/blob/5aa29614bf1dce05e0d316f8c38722e17f9b38c3/content_scripts/scroller.js) 和 [所有 frame 的初始化配置](https://github.com/philc/vimium/blob/5aa29614bf1dce05e0d316f8c38722e17f9b38c3/manifest.json)：尽早跟踪激活元素、实测滚动能力、寻找可见主要滚动容器。长按期间复用滚动目标，用 `requestAnimationFrame` 的时间差推进位移，不按重复事件重新搜索目标或追加距离。脚本由 Helper 在每个文档上下文创建时安装一次。这里借鉴了 Vimium 的持续动画思路，速度采用可配置值；Vimium 的站点规则和速度校准算法没有完整移植。
 
 交互提示通过 CEF 进程消息发送 Emacs 发起的脚本请求，在 renderer 的页面上下文中执行，再返回 JSON 数据。网页没有可调用的原生/Lisp 接口；请求按浏览器和 token 匹配，并有超时。标签输入由 Emacs 读取，选中后清理标签、重新校验目标，并聚焦编辑控件或通过 CEF 鼠标接口点击；新窗口请求仍通过统一的 popup 事件创建 buffer。
 

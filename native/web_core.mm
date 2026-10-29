@@ -5,9 +5,12 @@
 #include "include/cef_app.h"
 #include "include/cef_application_mac.h"
 #include "include/cef_browser.h"
+#include "include/views/cef_browser_view.h"
+#include "include/views/cef_window.h"
 #include "include/cef_browser_process_handler.h"
 #include "include/cef_client.h"
 #include "include/cef_find_handler.h"
+#include "include/cef_devtools_message_observer.h"
 #include "include/cef_command_line.h"
 #include "include/cef_process_message.h"
 #include "include/cef_version.h"
@@ -35,9 +38,24 @@ struct Page {
   int completedFind = -1;
   std::string inputFrame;
   bool inputControl = false;
+  int scrollStep = 60, scrollDuration = 140, scrollSpeed = 900;
+  unsigned short physicalCode = 0;
+  char physicalKey = 0, scrollKey = 0;
+  std::string scrollFrame;
+  bool scrollHeld = false;
 };
 std::map<int, std::shared_ptr<Page>> pages;
 std::map<int, CefRefPtr<CefBrowser>> browsers;
+// Chrome-style settings windows share the global request context, but never
+// enter the embedded Page map or its view/focus/lifecycle handling.
+CefRefPtr<CefBrowser> settingsBrowser;
+CefRefPtr<CefWindow> settingsWindow;
+std::map<int, CefRefPtr<CefBrowser>> settingsBrowsers;
+std::string settingsTitle;
+bool settingsClosing = false;
+CefRefPtr<CefRegistration> settingsTestObserver;
+std::string settingsTestResult;
+bool settingsTestSuccess = false;
 NSMutableArray<NSDictionary*>* queue;
 NSMapTable<NSNumber*, NSWindow*>* windows;
 bool initialized = false;
@@ -108,7 +126,40 @@ bool ownsFocus(const std::shared_ptr<Page>& page) {
   return [responder isKindOfClass:NSView.class] &&
     [(NSView*)responder isDescendantOf:page->container];
 }
+void stopScroll(const std::shared_ptr<Page>& page, bool cancel = true) {
+  if (page->browser && !page->scrollFrame.empty()) {
+    auto frame = page->browser->GetFrameByIdentifier(page->scrollFrame);
+    if (frame && frame->IsValid()) frame->ExecuteJavaScript(
+      cancel ? "window.__emacsWebScroller?.cancel();" : "window.__emacsWebScroller?.release();", "", 1);
+  }
+  page->scrollHeld = false;
+  page->scrollKey = 0;
+  if (cancel) { page->scrollFrame.clear(); page->physicalKey = 0; }
+}
+void scrollPage(const std::shared_ptr<Page>& page, CefRefPtr<CefFrame> frame,
+                double amount, int duration, int speed, const std::string& mode, bool held) {
+  if (!frame || !frame->IsValid() || !amount) return;
+  held = held && mode == "pixels" && page->physicalKey == (amount > 0 ? 'j' : 'k');
+  const auto frameId = frame->GetIdentifier().ToString();
+  if (held && page->scrollHeld && page->scrollFrame == frameId && page->scrollKey == page->physicalKey) {
+    frame->ExecuteJavaScript("window.__emacsWebScroller?.repeat();", "", 1);
+    return;
+  }
+  if (page->scrollHeld) {
+    const auto key = page->physicalKey;
+    stopScroll(page);
+    page->physicalKey = key;
+  }
+  page->scrollFrame = frameId;
+  page->scrollHeld = held;
+  page->scrollKey = held ? page->physicalKey : 0;
+  const auto prefix = held ? "window.__emacsWebScroller?.hold(" : "window.__emacsWebScroller?.scroll(";
+  const auto args = std::to_string(amount) + "," + std::to_string(duration) + "," +
+    (held ? std::to_string(speed) : "\"" + mode + "\"");
+  frame->ExecuteJavaScript(prefix + args + ");", "", 1);
+}
 void unfocus(const std::shared_ptr<Page>& page) {
+  stopScroll(page);
   if (ownsFocus(page)) {
     if (page->browser) page->browser->GetHost()->SetFocus(false);
     [page->container.window makeFirstResponder:page->host];
@@ -124,6 +175,7 @@ void setHandling(id self, SEL, BOOL value) {
 NSEvent* routeKeyEvent(NSEvent* event);
 void sendEvent(id self, SEL cmd, NSEvent* event) {
   event = routeKeyEvent(event);
+  if (!event) return;
   CefScopedSendingEvent scope;
   reinterpret_cast<void (*)(id, SEL, NSEvent*)>(originalSendEvent)(self, cmd, event);
 }
@@ -207,10 +259,8 @@ class Client final : public CefClient,
     const auto key = event.unmodified_character;
     if (key != 'j' && key != 'k') return false;
     if (event.type == KEYEVENT_RAWKEYDOWN || event.type == KEYEVENT_KEYDOWN) {
-      NSDictionary* payload = @{@"steps": @(key == 'j' ? 1 : -1),
-                                @"frame": ns(frame->GetIdentifier().ToString())};
-      NSData* data = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
-      emit(id_, @"scroll-key", [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]);
+      scrollPage(page, frame, key == 'j' ? page->scrollStep : -page->scrollStep,
+                 page->scrollDuration, page->scrollSpeed, "pixels", true);
     }
     return true;
   }
@@ -321,11 +371,169 @@ class Client final : public CefClient,
   IMPLEMENT_REFCOUNTING(Client);
 };
 
+class SettingsClient final : public CefClient,
+                             public CefLifeSpanHandler,
+                             public CefDisplayHandler,
+                             public CefFocusHandler {
+ public:
+  CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
+  CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
+  CefRefPtr<CefFocusHandler> GetFocusHandler() override { return this; }
+  void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
+    browsers[browser->GetIdentifier()] = browser;
+    settingsBrowsers[browser->GetIdentifier()] = browser;
+  }
+  void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
+    if (settingsBrowser && settingsBrowser->IsSame(browser)) {
+      settingsTestObserver = nullptr;
+      settingsBrowser = nullptr;
+      settingsTitle.clear();
+      // The native window may still be completing its close sequence.
+      settingsClosing = settingsWindow != nullptr;
+    }
+    settingsBrowsers.erase(browser->GetIdentifier());
+    browsers.erase(browser->GetIdentifier());
+  }
+  void OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString& title) override {
+    if (settingsBrowser && settingsBrowser->IsSame(browser)) {
+      settingsTitle = title.ToString();
+      if (settingsWindow) settingsWindow->SetTitle(title);
+    }
+  }
+  bool OnSetFocus(CefRefPtr<CefBrowser>, FocusSource) override {
+    return testMode;  // Disposable GUI probes must not take the user's keyboard.
+  }
+ private:
+  IMPLEMENT_REFCOUNTING(SettingsClient);
+};
+
+class SettingsViewDelegate final : public CefBrowserViewDelegate {
+ public:
+  cef_runtime_style_t GetBrowserRuntimeStyle() override { return CEF_RUNTIME_STYLE_CHROME; }
+ private:
+  IMPLEMENT_REFCOUNTING(SettingsViewDelegate);
+};
+
+class SettingsWindowDelegate final : public CefWindowDelegate {
+ public:
+  explicit SettingsWindowDelegate(CefRefPtr<CefBrowserView> view) : view_(view) {}
+  void OnWindowCreated(CefRefPtr<CefWindow> window) override {
+    settingsWindow = window;
+    window->SetTitle("Settings");
+    window->AddChildView(view_);
+    if (!testMode) window->Show();
+  }
+  void OnWindowClosing(CefRefPtr<CefWindow>) override { settingsClosing = true; }
+  void OnWindowDestroyed(CefRefPtr<CefWindow> window) override {
+    if (settingsWindow && settingsWindow->IsSame(window)) settingsWindow = nullptr;
+    view_ = nullptr;
+    settingsClosing = false;
+  }
+  bool CanClose(CefRefPtr<CefWindow>) override {
+    // CEF Views coordinates native window destruction with WebContents close.
+    auto browser = view_ ? view_->GetBrowser() : nullptr;
+    return !browser || browser->GetHost()->TryCloseBrowser();
+  }
+  CefSize GetPreferredSize(CefRefPtr<CefView>) override { return CefSize(1000, 760); }
+  cef_runtime_style_t GetWindowRuntimeStyle() override { return CEF_RUNTIME_STYLE_CHROME; }
+ private:
+  CefRefPtr<CefBrowserView> view_;
+  IMPLEMENT_REFCOUNTING(SettingsWindowDelegate);
+};
+
+bool isSettingsURL(const std::string& url) {
+  return url == "chrome://settings" || url.starts_with("chrome://settings/") ||
+    url.starts_with("chrome://settings?") || url.starts_with("chrome://settings#");
+}
+void openSettings(const std::string& requested) {
+  const auto url = requested.empty() ? std::string("chrome://settings/") : requested;
+  if (!isSettingsURL(url)) throw std::runtime_error("Expected a chrome://settings URL");
+  if (settingsClosing) throw std::runtime_error("Settings window is closing; try again shortly");
+  if (!settingsBrowser) {
+    CefBrowserSettings settings;
+    auto view = CefBrowserView::CreateBrowserView(new SettingsClient, url, settings,
+      nullptr, CefRequestContext::GetGlobalContext(), new SettingsViewDelegate);
+    if (!view) throw std::runtime_error("Could not create the Chrome settings view");
+    CefWindow::CreateTopLevelWindow(new SettingsWindowDelegate(view));
+    settingsBrowser = view->GetBrowser();
+    if (!settingsBrowser || !settingsWindow) {
+      if (settingsWindow) settingsWindow->Close();
+      throw std::runtime_error("Could not create the Chrome settings window");
+    }
+  } else if (!requested.empty()) {
+    // An explicit subpage navigates.  M-x web-settings merely raises the
+    // existing window, preserving a search, dialog or unfinished edit.
+    settingsBrowser->GetMainFrame()->LoadURL(url);
+  }
+  if (!testMode) {
+    settingsWindow->Restore();
+    settingsWindow->Show();
+    settingsWindow->Activate();
+    settingsBrowser->GetHost()->SetFocus(true);
+  }
+}
+void closeSettings() {
+  settingsClosing = settingsBrowser != nullptr || settingsWindow != nullptr;
+  auto closing = settingsBrowsers;
+  for (const auto& item : closing) item.second->GetHost()->CloseBrowser(true);
+}
+
+// Read-only inspection and page-driven preference changes in disposable tests.
+// This observer is never installed outside WEB_CEF_TEST_MODE.
+class SettingsTestObserver final : public CefDevToolsMessageObserver {
+ public:
+  void OnDevToolsMethodResult(CefRefPtr<CefBrowser>, int, bool success,
+                              const void* result, size_t size) override {
+    settingsTestSuccess = success;
+    settingsTestResult.assign(static_cast<const char*>(result), size);
+  }
+ private:
+  IMPLEMENT_REFCOUNTING(SettingsTestObserver);
+};
+
 NSEvent* routeKeyEvent(NSEvent* event) {
-  // Route before Emacs/Cocoa handles Escape as a fullscreen key equivalent.
+  // Observe release even when Emacs owns focus.  Only a scroll command chosen
+  // by the Lisp keymap can arm continuous scrolling in Emacs command mode.
+  if (event.type == NSEventTypeKeyUp) {
+    for (const auto& item : pages) {
+      const auto& page = item.second;
+      if (page->physicalKey && page->physicalCode == event.keyCode) {
+        page->physicalKey = 0;
+        stopScroll(page, false);
+      }
+    }
+    return event;
+  }
+  if (event.type == NSEventTypeLeftMouseDown || event.type == NSEventTypeRightMouseDown ||
+      event.type == NSEventTypeScrollWheel || event.type == NSEventTypeFlagsChanged) {
+    for (const auto& item : pages) stopScroll(item.second);
+    return event;
+  }
   if (event.type != NSEventTypeKeyDown) return event;
   const auto flags = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
   NSString* key = event.charactersIgnoringModifiers.lowercaseString;
+  const bool plainScroll = !(flags & (NSEventModifierFlagControl | NSEventModifierFlagOption |
+                                      NSEventModifierFlagCommand | NSEventModifierFlagShift)) &&
+    ([key isEqualToString:@"j"] || [key isEqualToString:@"k"]);
+  for (const auto& item : pages) {
+    const auto& page = item.second;
+    if (page->closing) continue;
+    const bool eligible = event.window == page->container.window && !page->container.hidden &&
+      (page->selected || ownsFocus(page));
+    if (!eligible || !plainScroll) {
+      stopScroll(page);
+      continue;
+    }
+    if (page->physicalKey && page->physicalKey != [key characterAtIndex:0]) stopScroll(page);
+    page->physicalKey = [key characterAtIndex:0];
+    page->physicalCode = event.keyCode;
+    if (event.isARepeat && page->scrollHeld) {
+      auto frame = page->browser->GetFrameByIdentifier(page->scrollFrame);
+      if (frame && frame->IsValid()) frame->ExecuteJavaScript("window.__emacsWebScroller?.repeat();", "", 1);
+      return nil;
+    }
+  }
+  // Route before Emacs/Cocoa handles Escape as a fullscreen key equivalent.
   const bool prefix = (flags & NSEventModifierFlagControl) &&
     [@[@"x", @"c", @"h", @"g"] containsObject:key];
   const bool metaX = (flags & NSEventModifierFlagOption) && [key isEqualToString:@"x"];
@@ -382,6 +590,10 @@ void initialize(const std::string& bundle, const std::string& profile) {
   if (!cef_load_library((framework + "/Chromium Embedded Framework").c_str()))
     throw std::runtime_error("Unable to load the CEF framework");
   adaptApplication();
+  for (NSString* name in @[NSApplicationDidResignActiveNotification, NSWindowDidResignKeyNotification]) {
+    [NSNotificationCenter.defaultCenter addObserverForName:name object:nil queue:nil
+      usingBlock:^(NSNotification*) { for (const auto& item : pages) stopScroll(item.second); }];
+  }
   queue = [NSMutableArray array];
   windows = [NSMapTable strongToWeakObjectsMapTable];
   CefSettings settings;
@@ -498,9 +710,63 @@ void hide(int id) {
 
 void command(int id, const std::string& action, const std::string& argument) {
   requireReady();
+  if (id == 0 && action == "settings") { openSettings(argument); return; }
+  if (id == 0 && action == "close-settings") { closeSettings(); return; }
+  if (id == 0 && action == "test-settings-close-window" && testMode) {
+    if (!settingsBrowser) throw std::runtime_error("No settings window");
+    NSView* view = (__bridge NSView*)settingsBrowser->GetHost()->GetWindowHandle();
+    [view.window performClose:nil];
+    return;
+  }
+  if (id == 0 && action == "test-settings-script" && testMode) {
+    if (!settingsBrowser) throw std::runtime_error("No settings window");
+    if (!settingsTestObserver) settingsTestObserver =
+      settingsBrowser->GetHost()->AddDevToolsMessageObserver(new SettingsTestObserver);
+    settingsTestResult.clear();
+    settingsTestSuccess = false;
+    auto params = CefDictionaryValue::Create();
+    params->SetString("expression", argument);
+    params->SetBool("returnByValue", true);
+    params->SetBool("awaitPromise", true);
+    settingsBrowser->GetHost()->ExecuteDevToolsMethod(0, "Runtime.evaluate", params);
+    return;
+  }
   auto page = pageFor(id);
   auto browser = page->browser;
-  if (action == "navigate") browser->GetMainFrame()->LoadURL(argument);
+  if (action == "navigate" || action == "reload" || action == "back" || action == "forward") stopScroll(page);
+  if (action == "scroll-settings") {
+    NSData* data = [ns(argument) dataUsingEncoding:NSUTF8StringEncoding];
+    NSArray* values = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![values isKindOfClass:NSArray.class] || values.count != 3)
+      throw std::runtime_error("Invalid scroll settings");
+    for (NSNumber* value in values) if (![value isKindOfClass:NSNumber.class] || [value doubleValue] < 0 ||
+                                  [value doubleValue] > 10000000)
+      throw std::runtime_error("Invalid scroll settings");
+    page->scrollStep = [values[0] intValue];
+    page->scrollDuration = [values[1] intValue];
+    page->scrollSpeed = [values[2] intValue];
+  }
+  else if (action == "scroll") {
+    NSData* data = [ns(argument) dataUsingEncoding:NSUTF8StringEncoding];
+    NSDictionary* request = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![request isKindOfClass:NSDictionary.class] ||
+        ![request[@"amount"] isKindOfClass:NSNumber.class] ||
+        ![request[@"duration"] isKindOfClass:NSNumber.class] ||
+        ![request[@"speed"] isKindOfClass:NSNumber.class] ||
+        ![request[@"held"] isKindOfClass:NSNumber.class] ||
+        ![request[@"frame"] isKindOfClass:NSString.class] ||
+        ![@[@"pixels", @"half", @"top", @"bottom"] containsObject:request[@"mode"]])
+      throw std::runtime_error("Invalid scroll request");
+    const double amount = [request[@"amount"] doubleValue];
+    const double duration = [request[@"duration"] doubleValue], speed = [request[@"speed"] doubleValue];
+    if (!std::isfinite(amount) || !std::isfinite(duration) || !std::isfinite(speed) ||
+        duration < 0 || duration > 10000000 || speed < 0 || speed > 10000000)
+      throw std::runtime_error("Invalid scroll values");
+    auto frame = [request[@"frame"] length] ? browser->GetFrameByIdentifier(utf8(request[@"frame"])) : browser->GetFocusedFrame();
+    if (!frame || !frame->IsValid()) frame = browser->GetMainFrame();
+    scrollPage(page, frame, amount, duration, speed, utf8(request[@"mode"]), [request[@"held"] boolValue]);
+  }
+  else if (action == "navigate") browser->GetMainFrame()->LoadURL(argument);
   else if (action == "reload") browser->Reload();
   else if (action == "back") browser->GoBack();
   else if (action == "forward") browser->GoForward();
@@ -526,7 +792,11 @@ void command(int id, const std::string& action, const std::string& argument) {
     page->pendingFind.clear();
     browser->GetHost()->StopFinding(true);
   }
-  else if (action == "selected") page->selected = argument == "1";
+  else if (action == "selected") {
+    const bool selected = argument == "1";
+    if (page->selected && !selected) stopScroll(page);
+    page->selected = selected;
+  }
   else if (action == "focus") browser->GetHost()->SetFocus(true);
   else if (action == "unfocus") unfocus(page);
   else if (action == "focus-parent") {
@@ -604,6 +874,17 @@ void command(int id, const std::string& action, const std::string& argument) {
     auto frame = browser->GetFrameByIdentifier(utf8(request[@"frame"]));
     if (frame && frame->IsValid()) frame->ExecuteJavaScript(utf8(request[@"script"]), "", 1);
   }
+  else if ((action == "test-key-down" || action == "test-key-repeat" || action == "test-key-up" ||
+            action == "test-command-down" || action == "test-command-up") && testMode) {
+    if (argument != "j" && argument != "k") throw std::runtime_error("Unsupported held test key");
+    const bool up = action == "test-key-up" || action == "test-command-up";
+    NSEvent* event = [NSEvent keyEventWithType:up ? NSEventTypeKeyUp : NSEventTypeKeyDown
+      location:NSZeroPoint modifierFlags:0 timestamp:NSProcessInfo.processInfo.systemUptime
+      windowNumber:page->container.window.windowNumber context:nil characters:ns(argument)
+      charactersIgnoringModifiers:ns(argument) isARepeat:action == "test-key-repeat" keyCode:argument == "j" ? 38 : 40];
+    if (action == "test-command-down" || action == "test-command-up") routeKeyEvent(event);
+    else [NSApp sendEvent:event];
+  }
   else if (action == "test-key" && testMode) {
     if (argument != "j" && argument != "k" && argument != "escape") throw std::runtime_error("Unsupported test key");
     // Exercise real Cocoa -> CEF keyboard dispatch, not the Lisp scroll command.
@@ -646,11 +927,27 @@ std::string info() {
   requireReady();
   return "CEF " CEF_VERSION "\nRuntime: Alloy (native child NSView)\nMessage pump: external (Emacs timer)\nSandbox: enabled\nPages: " +
     std::to_string(pages.size()) + "\nBrowsers including DevTools: " +
-    std::to_string(browsers.size()) + "\nKeychain: " +
+    std::to_string(browsers.size()) + "\nSettings browsers: " +
+    std::to_string(settingsBrowsers.size()) + "\nSettings windows: " +
+    std::to_string(settingsWindow ? 1 : 0) + "\nKeychain: " +
     (testMode ? "mock (disposable tests only)" : "system") + "\nProfile: " + profilePath;
 }
 std::string inspect(int id) {
   requireReady();
+  if (id == 0) {
+    NSView* view = settingsBrowser ? (__bridge NSView*)settingsBrowser->GetHost()->GetWindowHandle() : nil;
+    NSDictionary* state = @{@"count": @(settingsBrowsers.size()),
+      @"closing": @(settingsClosing), @"windowAlive": @(settingsWindow != nullptr),
+      @"id": @(settingsBrowser ? settingsBrowser->GetIdentifier() : 0),
+      @"chrome": @(settingsBrowser && settingsBrowser->GetHost()->GetRuntimeStyle() == CEF_RUNTIME_STYLE_CHROME),
+      @"sharedContext": @(settingsBrowser && settingsBrowser->GetHost()->GetRequestContext()->IsSame(CefRequestContext::GetGlobalContext())),
+      @"url": settingsBrowser ? ns(settingsBrowser->GetMainFrame()->GetURL().ToString()) : @"",
+      @"title": ns(settingsTitle), @"window": @(view.window.windowNumber),
+      @"testResult": testMode ? ns(settingsTestResult) : @"",
+      @"testSuccess": @(testMode && settingsTestSuccess)};
+    NSData* data = [NSJSONSerialization dataWithJSONObject:state options:0 error:nil];
+    return std::string(static_cast<const char*>(data.bytes), data.length);
+  }
   auto page = pageFor(id);
   NSRect rect = page->container.frame;
   NSView* host = page->host;
@@ -673,18 +970,18 @@ void shutdown() {
   for (const auto& item : closing) item.second->GetHost()->CloseBrowser(true);
   closing.clear();
   const auto deadline = [NSDate dateWithTimeIntervalSinceNow:3.0];
-  while (!browsers.empty() && deadline.timeIntervalSinceNow > 0) {
+  while ((!browsers.empty() || settingsWindow) && deadline.timeIntervalSinceNow > 0) {
     CefDoMessageLoopWork();
     [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
                            beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.005]];
   }
   // Calling CefShutdown with live browsers can crash.  On process exit the OS
   // will reclaim a stuck renderer; keep the framework loaded in that case.
-  if (browsers.empty()) {
+  if (browsers.empty() && !settingsWindow) {
     pages.clear();
     CefShutdown();
   } else {
-    NSLog(@"Web: skipping CefShutdown because %zu browsers did not close", browsers.size());
+    NSLog(@"Web: skipping CefShutdown because %zu browsers or a settings window did not close", browsers.size());
   }
   stopped = true;
 }

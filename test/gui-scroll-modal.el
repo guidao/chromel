@@ -37,6 +37,17 @@
   ;; container is a sibling, and the long outer body is locked.
   (web-test--click "#open-native")
   (web-test--until "document.getElementById('native').open" "Native modal did not open")
+  (web--command "test-key-down" "j")
+  (web-test--until "document.getElementById('native-scroll').scrollTop>150 && scrollY===0"
+                   "Held j escaped the modal or stopped after one step")
+  (web--command "test-key-up" "j")
+  (accept-process-output nil 0.1)
+  (let ((position (web-test--js "document.getElementById('native-scroll').scrollTop")))
+    (accept-process-output nil 0.15)
+    (web-test--assert (= position (web-test--js "document.getElementById('native-scroll').scrollTop"))
+                     "Modal kept scrolling after keyup"))
+  (let ((web-scroll-duration 0)) (web-scroll-to-top))
+  (web-test--until "document.getElementById('native-scroll').scrollTop===0" "Modal reset failed")
   (web--command "test-key" "j")
   (web-test--until "document.getElementById('native-scroll').scrollTop===60 && scrollY===0"
                    "Native modal scroll was lost or moved the background")

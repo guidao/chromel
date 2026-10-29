@@ -82,14 +82,17 @@ try:
                                  ("web-emacs-restored", "gui-hints.el"),
                                  ("controls-ready", "gui-controls.el"),
                                  ("scroll-ready", "gui-scroll.el"),
+                                 ("scroll-ready", "gui-hold.el"),
                                  ("scroll-modal-ready", "gui-scroll-modal.el"),
                                  ("web-emacs-restored", "gui-escape.el"),
                                  ("features-ready", "gui-features.el"),
                                  ("web-emacs-restored", "gui-keymap.el"),
                                  ("web-emacs-restored", "gui-pump.el"),
                                  ("session-seed", "gui-session.el"),
-                                 ("session-restore", "gui-session.el")]:
-            route = {'gui-features.el': '/features', 'gui-controls.el': '/controls', 'gui-scroll.el': '/scroll',
+                                 ("session-restore", "gui-session.el"),
+                                 ("settings-seed", "gui-settings.el"),
+                                 ("settings-restore", "gui-settings.el")]:
+            route = {'gui-features.el': '/features', 'gui-controls.el': '/controls', 'gui-scroll.el': '/scroll', 'gui-hold.el': '/scroll',
                      'gui-scroll-modal.el': '/scroll-modal'}.get(script, '/fixture')
             test_url = url.replace('/fixture', route)
             result = pathlib.Path(temp) / "result"
@@ -97,6 +100,8 @@ try:
             env = dict(os.environ, WEB_TEST_PROFILE=temp + "/profile",
                        WEB_TEST_RESULT=str(result), WEB_CEF_TEST_MODE="1",
                        WEB_TEST_URL=test_url, WEB_TEST_EXPECT_TITLE=expected)
+            if script == "gui-settings.el":
+                env["WEB_TEST_SETTINGS_PHASE"] = expected.removeprefix("settings-")
             if script == "gui-session.el":
                 env["WEB_TEST_SESSION_PHASE"] = expected.removeprefix("session-")
             if script == "gui-escape.el":
@@ -105,7 +110,12 @@ try:
             with log.open("w") as output:
                 process = subprocess.Popen(
                     [emacs, "-Q", "--eval", "(setq native-comp-jit-compilation nil)",
-                     "-L", str(root), "-l", str(root / "test" / script)],
+                     "-L", str(root), "-l", str(root / "test" / script),
+                     # Cocoa reads this at startup; keep it away from Emacs's
+                     # file-argument parser.  Avoid crash-recovery modal dialogs
+                     # in disposable test processes without changing defaults.
+                     "--eval", "(setq command-line-args-left nil)",
+                     "-ApplePersistenceIgnoreState", "YES"],
                     env=env, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
                 try:
                     status = process.wait(timeout=55)
@@ -120,6 +130,8 @@ try:
                 print(f"FAIL: GUI process exited ({status}) without a test result")
             if status:
                 raise SystemExit(status)
+            if script == "gui-settings.el":
+                assert "Web: skipping CefShutdown" not in log.read_text(), "Settings prevented clean CEF shutdown"
             history = json.loads((pathlib.Path(temp) / "profile/history.json").read_text())
             assert any(entry["url"] == test_url for entry in history), "History was not saved"
         print("PASS: Cookie, localStorage and history persist across two Emacs processes")

@@ -7,7 +7,7 @@
   // frame.  The first click must be remembered even before the first j/k.
   if (!window.__emacsWebScroller) {
     const animations = new Map();
-    let pending = 0, activated = null;
+    let pending = 0, activated = null, instantHold = 0;
     const parent = element => element.assignedSlot || element.parentElement || element.getRootNode().host;
     const limit = element => Math.max(0, element.scrollHeight - element.clientHeight);
     function contains(ancestor, child) {
@@ -120,25 +120,62 @@
       cancelAnimationFrame(pending);
       pending = 0;
       animations.clear();
+      instantHold = 0;
     }
     function animate(time) {
       pending = 0;
       for (const [element, state] of animations) {
         if (!element.isConnected) { animations.delete(element); continue; }
-        state.end = Math.min(state.end, limit(element));
-        const distance = state.end - element.scrollTop;
-        const elapsed = Math.max(0, Math.min(64, time - state.time));
-        const step = Math.abs(distance) * (1 - Math.exp(-elapsed / (state.duration / 4)));
-        const next = element.scrollTop + Math.sign(distance) * Math.min(Math.abs(distance), Math.max(1, step));
+        const elapsed = Math.max(0, Math.min(50, time - state.time));
         state.time = time;
+        // Integrate elapsed time, retaining fractional pixels.  A held key
+        // drives one animator independently of OS keyboard-repeat cadence.
+        const ramp = Math.max(0, Math.min(1, (time - state.started - 75) / 100));
+        const speed = state.held ? state.speed + (state.holdSpeed - state.speed) * ramp : state.speed;
+        const before = element.scrollTop;
+        state.position += state.sign * speed * elapsed;
+        const next = state.held ? state.position :
+          (state.sign > 0 ? Math.min(state.end, state.position) : Math.max(state.end, state.position));
         element.scrollTo({top: next, behavior: "instant"});
-        // Chromium may round scroll offsets; snap the final pixel exactly.
-        if (Math.abs(state.end - element.scrollTop) <= 1) {
-          element.scrollTo({top: state.end, behavior: "instant"});
+        if ((!state.held && Math.abs(state.end - element.scrollTop) <= 1) ||
+            (elapsed > 0 && Math.abs(next - before) >= 1 && element.scrollTop === before)) {
+          if (!state.held) element.scrollTo({top: state.end, behavior: "instant"});
           animations.delete(element);
         }
       }
       if (animations.size) pending = requestAnimationFrame(animate);
+    }
+    function scroll(amount, milliseconds, mode = "pixels", held = false, speed = 900) {
+      const absolute = mode === "top" || mode === "bottom";
+      const element = target(amount, absolute);
+      if (!element) return;
+      if (mode === "half") amount *= Math.max(1, Math.round(element.clientHeight / 2));
+      const previous = animations.get(element);
+      const base = previous && !previous.held && Math.sign(previous.end - element.scrollTop) === Math.sign(amount) ?
+        previous.end : element.scrollTop;
+      const end = mode === "top" ? 0 : mode === "bottom" ? limit(element) :
+        Math.max(0, Math.min(limit(element), base + amount));
+      if (!milliseconds || matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        animations.delete(element);
+        element.scrollTo({top: end, behavior: "instant"});
+        return;
+      }
+      const now = performance.now(), distance = end - element.scrollTop;
+      if (!distance) return;
+      animations.set(element, {end, held, sign: Math.sign(distance),
+        position: element.scrollTop, speed: Math.abs(distance) / milliseconds,
+        holdSpeed: speed / 1000, started: now, time: now});
+      if (!pending) pending = requestAnimationFrame(animate);
+    }
+    function release() {
+      instantHold = 0;
+      for (const [element, state] of animations) {
+        if (!state.held) continue;
+        state.held = false;
+        // A tap still travels one step.  After that minimum distance a keyup
+        // stops immediately; there is no queue of repeat distances to drain.
+        if (state.sign * (state.end - element.scrollTop) <= 0) animations.delete(element);
+      }
     }
     window.addEventListener("wheel", cancel, {capture: true, passive: true});
     window.addEventListener("touchstart", cancel, {capture: true, passive: true});
@@ -149,28 +186,18 @@
     window.addEventListener("focusin", event => { activated = event.composedPath()[0]; }, true);
     window.addEventListener("click", event => { activated = event.composedPath()[0]; }, true);
     window.addEventListener("pagehide", cancel);
+    window.addEventListener("blur", cancel);
+    document.addEventListener("visibilitychange", () => { if (document.hidden) cancel(); });
     window.__emacsWebScroller = {
       reset() { cancel(); activated = null; },
-      scroll(amount, milliseconds, mode = "pixels") {
-        const absolute = mode === "top" || mode === "bottom";
-        const element = target(amount, absolute);
-        if (!element) return;
-        if (mode === "half") amount *= Math.max(1, Math.round(element.clientHeight / 2));
-        const previous = animations.get(element);
-        const base = previous && Math.sign(previous.end - element.scrollTop) === Math.sign(amount) ?
-          previous.end : element.scrollTop;
-        const end = mode === "top" ? 0 : mode === "bottom" ? limit(element) :
-          Math.max(0, Math.min(limit(element), base + amount));
-        if (!milliseconds || matchMedia("(prefers-reduced-motion: reduce)").matches) {
-          animations.delete(element);
-          element.scrollTo({top: end, behavior: "instant"});
-          return;
-        }
-        // Extend a shared target instead of restarting the browser's native
-        // smooth-scroll animation on every key repeat.  Reversals start from
-        // the current position, dropping the old direction's queued distance.
-        animations.set(element, {end, duration: milliseconds, time: previous?.time ?? performance.now()});
-        if (!pending) pending = requestAnimationFrame(animate);
+      cancel, release, scroll,
+      repeat() { if (instantHold) scroll(instantHold, 0); },
+      hold(amount, milliseconds, speed) {
+        // Preserve the unfinished distance of a previous distinct tap.  A
+        // direction change/cancellation is handled separately by the host.
+        instantHold = 0;
+        if (!milliseconds || matchMedia("(prefers-reduced-motion: reduce)").matches) instantHold = amount;
+        scroll(amount, milliseconds, "pixels", true, speed);
       }
     };
   }
