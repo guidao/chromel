@@ -1,0 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Generated from scroll.js so tracking starts in every renderer context.
+#pragma once
+constexpr char kWebScrollBootstrap[] = R"WEB_SCRIPT(@WEB_SCROLL_SOURCE@(0,0);)WEB_SCRIPT";

@@ -1,0 +1,69 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>controls-ready</title>
+<style>
+  body {font:16px sans-serif; margin:16px}
+  section {display:flex; gap:12px; margin-bottom:14px; align-items:center}
+  [role=button], [role=tab], #custom {cursor:pointer; padding:5px; border:1px solid}
+  #editor {border:1px solid; min-width:150px}
+</style>
+<section>
+  <span role="button" onclick="void 0" aria-label="Button wrapper"><button id="button" aria-label="Native button">Button <span role="button" tabindex="0" onclick="void 0" aria-label="Button decoration">child</span></button></span>
+  <button id="blocked" disabled>Disabled</button>
+  <button id="aria-blocked" aria-disabled="true">ARIA disabled</button>
+  <fieldset disabled><button id="fieldset-blocked">Fieldset disabled</button></fieldset>
+  <div inert><button id="inert-blocked">Inert button</button></div>
+</section>
+<section>
+  <div id="role-button" role="button" tabindex="0" aria-label="Role button"><span>ARIA button</span></div>
+  <div id="custom" aria-label="Custom listener"><span>JS listener</span></div>
+  <div id="tab" role="tab" aria-label="Tab">Tab</div>
+  <span id="inline" onclick="state.inline++" aria-label="Inline handler">Inline</span>
+  <div id="focusable" tabindex="0" aria-label="Focusable">Focusable div</div>
+</section>
+<section>
+  <input id="text" value="hello" aria-label="Text field">
+  <input id="readonly" value="read only" readonly aria-label="Read only">
+  <textarea id="textarea" aria-label="Text area">line one
+line two</textarea>
+  <div id="editor" contenteditable="true" aria-label="Rich editor"><span>Editable content</span></div>
+  <select id="select" aria-label="Dropdown"><option>A</option><option>B</option></select>
+</section>
+<section>
+  <input id="checkbox" type="checkbox" aria-label="Checkbox">
+  <label for="checkbox">Visible checkbox label</label>
+  <input id="radio" type="radio" name="choice" aria-label="Radio">
+  <input id="hidden-checkbox" type="checkbox" style="display:none">
+  <label id="hidden-label" for="hidden-checkbox" aria-label="Hidden checkbox label">Styled checkbox</label>
+  <label for="hidden-checkbox" aria-label="Duplicate checkbox label">Same checkbox</label>
+  <details id="details"><summary aria-label="Details">Details</summary>Expanded</details>
+</section>
+<section>
+  <a id="intercept" href="/must-not-navigate" aria-label="Intercepted link">SPA link</a>
+  <button id="popup" aria-label="Popup button">Open popup</button>
+  <a id="target-blank" href="/hint-target" target="_blank" aria-label="Blank link">New window link</a>
+  <button id="disappears" aria-label="Disappearing">Dynamic button</button>
+  <div id="shadow"></div>
+</section>
+<section>
+  <div role="button" onclick="void 0" aria-label="Nested wrapper"><span role="button" aria-label="Nested action" onclick="state.nested++">Nested action</span></div>
+  <span role="button" onclick="void 0" aria-label="Two-button wrapper"><button aria-label="Independent left" onclick="state.left++">Same text</button><button aria-label="Independent right" onclick="state.right++">Same text</button></span>
+</section>
+<dialog id="dialog"><button id="modal" aria-label="Modal button">Modal action</button></dialog>
+<script>
+  window.state = {button:0, role:0, custom:0, tab:0, inline:0, focusable:0, intercepted:0, shadow:0, modal:0, nested:0, left:0, right:0, trusted:false, events:[]};
+  const button = document.getElementById('button');
+  for (const name of ['pointerdown','mousedown','pointerup','mouseup','click'])
+    button.addEventListener(name, e => {state.events.push(e.type); state.trusted=e.isTrusted});
+  button.addEventListener('click', () => state.button++);
+  document.getElementById('role-button').addEventListener('click', () => state.role++);
+  document.getElementById('custom').addEventListener('click', () => state.custom++);
+  document.getElementById('tab').addEventListener('click', () => state.tab++);
+  document.getElementById('focusable').addEventListener('click', () => state.focusable++);
+  document.getElementById('intercept').addEventListener('click', e => {e.preventDefault();state.intercepted++});
+  document.getElementById('popup').addEventListener('click', () => window.open('/hint-target','_blank'));
+  document.getElementById('modal').addEventListener('click', () => {state.modal++; document.getElementById('dialog').close()});
+  const shadow = document.getElementById('shadow').attachShadow({mode:'open'});
+  shadow.innerHTML='<button aria-label="Shadow button"><span>Shadow</span></button>';
+  shadow.querySelector('button').addEventListener('click', () => state.shadow++);
+</script>

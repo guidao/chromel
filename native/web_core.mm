@@ -1,0 +1,691 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+#import <Cocoa/Cocoa.h>
+#import <objc/runtime.h>
+#include "web_core.h"
+#include "include/cef_app.h"
+#include "include/cef_application_mac.h"
+#include "include/cef_browser.h"
+#include "include/cef_browser_process_handler.h"
+#include "include/cef_client.h"
+#include "include/cef_find_handler.h"
+#include "include/cef_command_line.h"
+#include "include/cef_process_message.h"
+#include "include/cef_version.h"
+#include "include/wrapper/cef_helpers.h"
+#include "include/wrapper/cef_library_loader.h"
+#include <map>
+#include <filesystem>
+#include <memory>
+#include <cmath>
+#include <stdexcept>
+#include <signal.h>
+#include <pthread.h>
+
+namespace {
+struct Page {
+  int id;
+  NSView* container;
+  __weak NSWindow* lifetimeWindow;
+  __weak NSView* host;
+  CefRefPtr<CefBrowser> browser;
+  bool closing = false;
+  bool selected = false;
+  std::string pendingEval;
+  std::string pendingFind;
+  int completedFind = -1;
+  std::string inputFrame;
+  bool inputControl = false;
+};
+std::map<int, std::shared_ptr<Page>> pages;
+std::map<int, CefRefPtr<CefBrowser>> browsers;
+NSMutableArray<NSDictionary*>* queue;
+NSMapTable<NSNumber*, NSWindow*>* windows;
+bool initialized = false;
+bool stopped = false;
+bool pumping = false;
+int nextId = 1;
+std::string profilePath;
+bool testMode = false;
+char handlingEventKey;
+IMP originalSendEvent;
+
+// Chromium initializes as if it owned main(), resetting process signal
+// dispositions.  Emacs relies on SIGALRM and friends for its own event loop.
+class HostSignals {
+ public:
+  HostSignals() {
+    sigset_t blocked;
+    sigemptyset(&blocked);
+    for (size_t i = 0; i < count; ++i) {
+      sigaction(signals[i], nullptr, &actions[i]);
+      sigaddset(&blocked, signals[i]);
+    }
+    pthread_sigmask(SIG_BLOCK, &blocked, &mask);
+  }
+  ~HostSignals() {
+    for (size_t i = 0; i < count; ++i) sigaction(signals[i], &actions[i], nullptr);
+    pthread_sigmask(SIG_SETMASK, &mask, nullptr);
+  }
+ private:
+  static constexpr int signals[] = {SIGALRM, SIGVTALRM, SIGPROF, SIGIO, SIGCHLD,
+                                    SIGUSR1, SIGUSR2, SIGWINCH, SIGINT, SIGHUP, SIGTERM, SIGQUIT};
+  static constexpr size_t count = sizeof(signals) / sizeof(signals[0]);
+  struct sigaction actions[count];
+  sigset_t mask;
+};
+
+NSString* ns(const std::string& s) {
+  return [[NSString alloc] initWithBytes:s.data() length:s.size()
+                               encoding:NSUTF8StringEncoding] ?: @"";
+}
+std::string utf8(NSString* s) { return s ? std::string(s.UTF8String ?: "") : ""; }
+void checkThread() {
+  if (![NSThread isMainThread]) throw std::runtime_error("CEF must run on the Cocoa main thread");
+}
+void requireReady() {
+  checkThread();
+  if (!initialized || stopped) throw std::runtime_error("CEF is not running");
+}
+void emit(int id, NSString* type, NSString* value = @"") {
+  if (!id) return;
+  // Every callback used here is delivered on the CEF UI (Cocoa main) thread.
+  [queue addObject:@{@"id": @(id), @"type": type, @"value": value ?: @""}];
+}
+std::shared_ptr<Page> pageFor(int id) {
+  auto found = pages.find(id);
+  if (found == pages.end() || found->second->closing)
+    throw std::runtime_error("Browser is closed or unknown");
+  return found->second;
+}
+NSWindow* windowFor(long handle) {
+  NSWindow* win = [windows objectForKey:@(handle)];
+  if (!win || ![NSApp.windows containsObject:win])
+    throw std::runtime_error("Emacs frame no longer exists");
+  return win;
+}
+bool ownsFocus(const std::shared_ptr<Page>& page) {
+  NSResponder* responder = page->container.window.firstResponder;
+  return [responder isKindOfClass:NSView.class] &&
+    [(NSView*)responder isDescendantOf:page->container];
+}
+void unfocus(const std::shared_ptr<Page>& page) {
+  if (ownsFocus(page)) {
+    if (page->browser) page->browser->GetHost()->SetFocus(false);
+    [page->container.window makeFirstResponder:page->host];
+  }
+}
+
+BOOL isHandling(id self, SEL) {
+  return [objc_getAssociatedObject(self, &handlingEventKey) boolValue];
+}
+void setHandling(id self, SEL, BOOL value) {
+  objc_setAssociatedObject(self, &handlingEventKey, @(value), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+NSEvent* routeKeyEvent(NSEvent* event);
+void sendEvent(id self, SEL cmd, NSEvent* event) {
+  event = routeKeyEvent(event);
+  CefScopedSendingEvent scope;
+  reinterpret_cast<void (*)(id, SEL, NSEvent*)>(originalSendEvent)(self, cmd, event);
+}
+void adaptApplication() {
+  if ([NSApp conformsToProtocol:@protocol(CefAppProtocol)]) return;
+  Class base = object_getClass(NSApp);
+  Method method = class_getInstanceMethod(base, @selector(sendEvent:));
+  originalSendEvent = method_getImplementation(method);
+  // Preserve the application class identity: Foundation KVO can already have
+  // registered observations before a module is loaded into a running Emacs.
+  if (!class_addMethod(base, @selector(sendEvent:), (IMP)sendEvent, method_getTypeEncoding(method)))
+    method_setImplementation(method, (IMP)sendEvent);
+  const auto getterType = std::string(@encode(BOOL)) + "@:";
+  const auto setterType = std::string("v@:") + @encode(BOOL);
+  class_addMethod(base, @selector(isHandlingSendEvent), (IMP)isHandling, getterType.c_str());
+  class_addMethod(base, @selector(setHandlingSendEvent:), (IMP)setHandling, setterType.c_str());
+  class_addProtocol(base, @protocol(CefAppProtocol));
+}
+
+class App final : public CefApp, public CefBrowserProcessHandler {
+ public:
+  CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override { return this; }
+  void OnScheduleMessagePumpWork(int64_t /*delayMs*/) override {
+    // Emacs already schedules pump() on its main thread every 20 ms, including
+    // while waiting in the minibuffer.  That recurring timer coalesces requests
+    // and services delayed work too.  This callback can run on ANY thread:
+    // never call Lisp, Cocoa, or CefDoMessageLoopWork synchronously here.
+  }
+  void OnBeforeCommandLineProcessing(const CefString& processType,
+                                     CefRefPtr<CefCommandLine> commandLine) override {
+    // Test-only Chromium facility: never ask the user's Keychain to authorize
+    // disposable, repeatedly re-signed test apps.  Production uses Keychain.
+    if (testMode && processType.empty()) commandLine->AppendSwitch("use-mock-keychain");
+  }
+ private:
+  IMPLEMENT_REFCOUNTING(App);
+};
+
+class Client final : public CefClient,
+                     public CefLifeSpanHandler,
+                     public CefDisplayHandler,
+                     public CefLoadHandler,
+                     public CefFocusHandler,
+                     public CefRequestHandler,
+                     public CefKeyboardHandler,
+                     public CefFindHandler {
+ public:
+  explicit Client(int id) : id_(id) {}
+  CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
+  CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
+  CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
+  CefRefPtr<CefFocusHandler> GetFocusHandler() override { return this; }
+  CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
+  CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override { return this; }
+  CefRefPtr<CefFindHandler> GetFindHandler() override { return this; }
+  void OnFindResult(CefRefPtr<CefBrowser>, int identifier, int count, const CefRect&,
+                    int ordinal, bool finalUpdate) override {
+    const auto found = pages.find(id_);
+    if (found == pages.end() || found->second->pendingFind.empty() ||
+        identifier <= found->second->completedFind) return;
+    const auto page = found->second;
+    NSDictionary* result = @{@"token": ns(page->pendingFind), @"count": @(count),
+                             @"ordinal": @(ordinal), @"final": @(finalUpdate)};
+    NSData* data = [NSJSONSerialization dataWithJSONObject:result options:0 error:nil];
+    emit(id_, @"find", [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]);
+    if (finalUpdate) {
+      page->completedFind = identifier;
+      page->pendingFind.clear();
+    }
+  }
+  bool OnPreKeyEvent(CefRefPtr<CefBrowser> browser, const CefKeyEvent& event,
+                     CefEventHandle, bool*) override {
+    const auto found = pages.find(id_);
+    if (found == pages.end() || found->second->closing || event.focus_on_editable_field ||
+        (event.modifiers & (EVENTFLAG_SHIFT_DOWN | EVENTFLAG_CONTROL_DOWN |
+                            EVENTFLAG_ALT_DOWN | EVENTFLAG_COMMAND_DOWN))) return false;
+    auto frame = browser->GetFocusedFrame();
+    if (!frame || !frame->IsValid()) return false;
+    const auto page = found->second;
+    if (page->inputControl && page->inputFrame == frame->GetIdentifier().ToString()) return false;
+    const auto key = event.unmodified_character;
+    if (key != 'j' && key != 'k') return false;
+    if (event.type == KEYEVENT_RAWKEYDOWN || event.type == KEYEVENT_KEYDOWN) {
+      NSDictionary* payload = @{@"steps": @(key == 'j' ? 1 : -1),
+                                @"frame": ns(frame->GetIdentifier().ToString())};
+      NSData* data = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
+      emit(id_, @"scroll-key", [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]);
+    }
+    return true;
+  }
+  bool OnProcessMessageReceived(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame,
+                                CefProcessId source, CefRefPtr<CefProcessMessage> message) override {
+    if (source == PID_RENDERER && message->GetName() == "web.input-focus") {
+      auto found = pages.find(id_);
+      if (found != pages.end() && !found->second->closing && frame) {
+        found->second->inputFrame = frame->GetIdentifier().ToString();
+        found->second->inputControl = message->GetArgumentList()->GetBool(0);
+      }
+      return true;
+    }
+    if (source != PID_RENDERER || message->GetName() != "web.eval.result" || !frame->IsMain())
+      return false;
+    auto found = pages.find(id_);
+    auto args = message->GetArgumentList();
+    const auto token = args->GetString(0).ToString();
+    if (found != pages.end() && !found->second->closing &&
+        !token.empty() && found->second->pendingEval == token) {
+      found->second->pendingEval.clear();
+      NSDictionary* response = @{@"token": ns(token), @"ok": @(args->GetBool(1)),
+                                 @"result": ns(args->GetString(2).ToString())};
+      NSData* data = [NSJSONSerialization dataWithJSONObject:response options:0 error:nil];
+      emit(id_, @"eval", [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]);
+    }
+    return true;
+  }
+  void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
+    CEF_REQUIRE_UI_THREAD();
+    browsers[browser->GetIdentifier()] = browser;
+  }
+  bool DoClose(CefRefPtr<CefBrowser> browser) override {
+    auto found = pages.find(id_);
+    if (found != pages.end()) {
+      auto page = found->second;
+      unfocus(page);
+      // Restore the view to its hidden lifetime window before allowing CEF's
+      // normal close procedure.  CEF owns that window; retaining it here would
+      // prevent the window/view teardown that completes OnBeforeClose.
+      // This must never performClose: the visible Emacs host window.
+      NSView* view = (__bridge NSView*)browser->GetHost()->GetWindowHandle();
+      [view removeFromSuperview];
+      [page->lifetimeWindow.contentView addSubview:view];
+    }
+    return false;
+  }
+  void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
+    CEF_REQUIRE_UI_THREAD();
+    browsers.erase(browser->GetIdentifier());
+    auto found = pages.find(id_);
+    if (found != pages.end()) {
+      auto page = found->second;
+      page->browser = nullptr;
+      [page->container removeFromSuperview];
+      pages.erase(found);
+      emit(id_, @"closed");
+    }
+  }
+  bool OnBeforePopup(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>, int,
+                     const CefString& url, const CefString&, WindowOpenDisposition disposition,
+                     bool userGesture, const CefPopupFeatures&, CefWindowInfo&,
+                     CefRefPtr<CefClient>&, CefBrowserSettings&,
+                     CefRefPtr<CefDictionaryValue>&, bool*) override {
+    // Deliberate MVP behavior: user-requested links become new Emacs buffers.
+    // This does not preserve window.opener / script-created popup sessions.
+    if (userGesture && !url.empty())
+      emit(id_, disposition == CEF_WOD_NEW_BACKGROUND_TAB ? @"popup-background" : @"popup", ns(url.ToString()));
+    return true;
+  }
+  bool OnOpenURLFromTab(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>,
+                        const CefString& url, WindowOpenDisposition disposition,
+                        bool userGesture) override {
+    // Modified clicks use this callback, not OnBeforePopup.  Letting CEF's
+    // default handler proceed would navigate the source browser instead.
+    if (disposition != CEF_WOD_NEW_FOREGROUND_TAB &&
+        disposition != CEF_WOD_NEW_BACKGROUND_TAB &&
+        disposition != CEF_WOD_NEW_WINDOW && disposition != CEF_WOD_NEW_POPUP)
+      return false;
+    if (userGesture && !url.empty())
+      emit(id_, disposition == CEF_WOD_NEW_BACKGROUND_TAB ? @"popup-background" : @"popup", ns(url.ToString()));
+    return true;
+  }
+  void OnTitleChange(CefRefPtr<CefBrowser>, const CefString& title) override {
+    emit(id_, @"title", ns(title.ToString()));
+  }
+  void OnAddressChange(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame,
+                       const CefString& url) override {
+    if (frame->IsMain()) emit(id_, @"url", ns(url.ToString()));
+  }
+  void OnLoadingStateChange(CefRefPtr<CefBrowser>, bool loading, bool, bool) override {
+    emit(id_, @"loading", loading ? @"1" : @"0");
+  }
+  void OnLoadEnd(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame, int status) override {
+    if (frame->IsMain() && status < 400) emit(id_, @"loaded");
+  }
+  void OnLoadError(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame,
+                   ErrorCode code, const CefString& message, const CefString&) override {
+    if (frame->IsMain() && code != ERR_ABORTED) emit(id_, @"error", ns(message.ToString()));
+  }
+  bool OnSetFocus(CefRefPtr<CefBrowser>, FocusSource source) override {
+    // Loading in a background buffer must not steal the minibuffer's focus.
+    return source == FOCUS_SOURCE_NAVIGATION;
+  }
+  void OnGotFocus(CefRefPtr<CefBrowser>) override { emit(id_, @"focus"); }
+ private:
+  const int id_;
+  IMPLEMENT_REFCOUNTING(Client);
+};
+
+NSEvent* routeKeyEvent(NSEvent* event) {
+  // Route before Emacs/Cocoa handles Escape as a fullscreen key equivalent.
+  if (event.type != NSEventTypeKeyDown) return event;
+  const auto flags = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
+  NSString* key = event.charactersIgnoringModifiers.lowercaseString;
+  const bool prefix = (flags & NSEventModifierFlagControl) &&
+    [@[@"x", @"c", @"h", @"g"] containsObject:key];
+  const bool metaX = (flags & NSEventModifierFlagOption) && [key isEqualToString:@"x"];
+  const bool escape = event.keyCode == 53 &&
+    !(flags & (NSEventModifierFlagControl | NSEventModifierFlagOption |
+               NSEventModifierFlagCommand | NSEventModifierFlagShift));
+  if (prefix || metaX || escape) {
+    for (const auto& item : pages) {
+      const auto& page = item.second;
+      if (page->closing || event.window != page->container.window) continue;
+      const bool commandFocus = page->selected && !page->container.hidden;
+      if (!ownsFocus(page) && !(escape && commandFocus)) continue;
+      unfocus(page);
+      if (escape) {
+        // Deliver the same Control-g event as the physical shortcut.  Do not
+        // let Cocoa/Chromium interpret Escape as a fullscreen-exit command.
+        return [NSEvent keyEventWithType:NSEventTypeKeyDown location:event.locationInWindow
+          modifierFlags:NSEventModifierFlagControl timestamp:event.timestamp
+          windowNumber:event.windowNumber context:nil characters:@"\x07"
+          charactersIgnoringModifiers:@"g" isARepeat:event.isARepeat keyCode:5];
+      }
+      break;
+    }
+  }
+  return event;
+}
+}  // namespace
+
+namespace web {
+void initialize(const std::string& bundle, const std::string& profile) {
+  checkThread();
+  std::filesystem::create_directories(profile + "/Default");
+  const auto canonicalProfile = std::filesystem::canonical(profile).string();
+  testMode = getenv("WEB_CEF_TEST_MODE") && std::string(getenv("WEB_CEF_TEST_MODE")) == "1";
+  if (testMode) {
+    auto temp = std::filesystem::canonical(utf8(NSTemporaryDirectory())).string() + "/";
+    if (canonicalProfile.compare(0, temp.size(), temp) != 0)
+      throw std::runtime_error("CEF test mode requires a temporary profile under NSTemporaryDirectory");
+  }
+  if (stopped) throw std::runtime_error("CEF cannot be restarted in this Emacs process");
+  if (initialized) {
+    if (canonicalProfile != profilePath) throw std::runtime_error("Restart Emacs to change CEF profiles");
+    return;
+  }
+  if (!NSApp) throw std::runtime_error("A running Cocoa application is required");
+  const auto framework = bundle + "/Contents/Frameworks/Chromium Embedded Framework.framework";
+  const auto helper = bundle + "/Contents/Frameworks/Web Helper.app/Contents/MacOS/Web Helper";
+  if (![[NSFileManager defaultManager] isExecutableFileAtPath:ns(helper)])
+    throw std::runtime_error("CEF helper missing; run scripts/build.sh");
+  const auto mainBundle = std::filesystem::canonical(utf8(NSBundle.mainBundle.bundlePath)).string() + "/";
+  const auto frameworkReal = std::filesystem::canonical(framework).string();
+  if (frameworkReal.compare(0, mainBundle.size(), mainBundle) != 0)
+    throw std::runtime_error("CEF sandbox requires its framework inside the running app bundle. Start Emacs with this plugin's scripts/launch.sh (the original Emacs.app is unchanged).");
+  if (!cef_load_library((framework + "/Chromium Embedded Framework").c_str()))
+    throw std::runtime_error("Unable to load the CEF framework");
+  adaptApplication();
+  queue = [NSMutableArray array];
+  windows = [NSMapTable strongToWeakObjectsMapTable];
+  CefSettings settings;
+  settings.command_line_args_disabled = true;
+  // With the default macOS pump, CefDoMessageLoopWork can call [NSApp run]
+  // when Emacs has temporarily stopped AppKit's loop.  Reentering EmacsApp.run
+  // from a Lisp timer corrupts AppKit autorelease-pool lifetime.  The external
+  // pump executes CEF tasks only; Emacs remains responsible for Cocoa events.
+  // A non-null BrowserProcessHandler is required, or CEF falls back to the
+  // default native pump even when external_message_pump is enabled.
+  settings.external_message_pump = true;
+  settings.persist_session_cookies = true;
+  CefString(&settings.framework_dir_path) = framework;
+  CefString(&settings.main_bundle_path) = bundle;
+  CefString(&settings.browser_subprocess_path) = helper;
+  CefString(&settings.root_cache_path) = canonicalProfile;
+  CefString(&settings.cache_path) = canonicalProfile + "/Default";
+  CefString(&settings.log_file) = canonicalProfile + "/cef.log";
+  settings.log_severity = LOGSEVERITY_WARNING;
+  // Keep the Chromium subprocess sandbox enabled.  Helpers initialize it
+  // before loading the framework.  No --no-sandbox or certificate bypasses.
+  std::string executable = utf8(NSBundle.mainBundle.executablePath);
+  char* argv[] = {executable.data(), nullptr};
+  CefMainArgs args(1, argv);
+  bool success;
+  {
+    HostSignals preserveEmacsSignals;
+    success = CefInitialize(args, settings, new App, nullptr);
+  }
+  if (!success) {
+    stopped = true;
+    throw std::runtime_error("CEF initialization failed; inspect the profile cef.log and restart Emacs");
+  }
+  profilePath = canonicalProfile;
+  initialized = true;
+}
+
+long bind_window(const std::string& title) {
+  requireReady();
+  for (NSWindow* window in NSApp.windows) {
+    if ([window.title isEqualToString:ns(title)]) {
+      [windows setObject:window forKey:@(window.windowNumber)];
+      return window.windowNumber;
+    }
+  }
+  throw std::runtime_error("Cannot identify the Emacs NSWindow by its temporary title");
+}
+
+int create(long handle, const std::string& url) {
+  requireReady();
+  NSWindow* win = windowFor(handle);
+  auto page = std::make_shared<Page>();
+  page->id = nextId++;
+  page->host = win.contentView;
+  page->container = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 1, 1)];
+  page->container.wantsLayer = YES;
+  page->container.hidden = YES;
+  [page->host addSubview:page->container];
+  pages[page->id] = page;
+  CefWindowInfo windowInfo;
+  // Let CEF own a permanently hidden lifecycle window so its public close
+  // path remains usable after embedding.  Only its child NSView is displayed
+  // in Emacs; there is no external overlay or window-position tracking.
+  windowInfo.hidden = true;
+  windowInfo.bounds = CefRect(0, 0, 1, 1);
+  windowInfo.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
+  CefBrowserSettings settings;
+  CefRefPtr<Client> client(new Client(page->id));
+  page->browser = CefBrowserHost::CreateBrowserSync(windowInfo, client, url, settings, nullptr, nullptr);
+  if (!page->browser) {
+    [page->container removeFromSuperview];
+    pages.erase(page->id);
+    throw std::runtime_error("CEF browser creation failed");
+  }
+  // CEF owns its view; the clipping container belongs to this plugin.
+  NSView* view = (__bridge NSView*)page->browser->GetHost()->GetWindowHandle();
+  page->lifetimeWindow = view.window;
+  [view removeFromSuperview];
+  [page->container addSubview:view];
+  view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+  return page->id;
+}
+
+void layout(int id, long handle, double x, double y, double width, double height) {
+  requireReady();
+  auto page = pageFor(id);
+  NSView* host = windowFor(handle).contentView;
+  if (page->host != host) {
+    unfocus(page);
+    [page->container removeFromSuperview];
+    page->host = host;
+    [host addSubview:page->container];
+  }
+  // Emacs pixel edges on NS are logical points; multiplying by Retina scale
+  // would double the size.  Convert from top-left only for unflipped hosts.
+  const double cy = host.isFlipped ? y : NSHeight(host.bounds) - y - height;
+  NSRect rect = NSMakeRect(x, cy, std::max(0.0, width), std::max(0.0, height));
+  if (!NSEqualRects(page->container.frame, rect)) {
+    page->container.frame = rect;
+    NSView* view = (__bridge NSView*)page->browser->GetHost()->GetWindowHandle();
+    view.frame = page->container.bounds;
+    page->browser->GetHost()->NotifyMoveOrResizeStarted();
+  }
+  page->container.hidden = width <= 0 || height <= 0;
+}
+
+void hide(int id) {
+  requireReady();
+  auto page = pageFor(id);
+  unfocus(page);
+  page->container.hidden = YES;
+  page->selected = false;
+}
+
+void command(int id, const std::string& action, const std::string& argument) {
+  requireReady();
+  auto page = pageFor(id);
+  auto browser = page->browser;
+  if (action == "navigate") browser->GetMainFrame()->LoadURL(argument);
+  else if (action == "reload") browser->Reload();
+  else if (action == "back") browser->GoBack();
+  else if (action == "forward") browser->GoForward();
+  else if (action == "stop") browser->StopLoad();
+  else if (action == "find") {
+    NSData* data = [ns(argument) dataUsingEncoding:NSUTF8StringEncoding];
+    NSDictionary* request = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![request isKindOfClass:NSDictionary.class] ||
+        ![request[@"text"] isKindOfClass:NSString.class] ||
+        ![request[@"token"] isKindOfClass:NSString.class] ||
+        ![request[@"forward"] isKindOfClass:NSNumber.class] ||
+        ![request[@"next"] isKindOfClass:NSNumber.class] ||
+        [request[@"text"] length] == 0 || [request[@"token"] length] == 0)
+      throw std::runtime_error("Invalid find request");
+    if (!page->pendingFind.empty()) throw std::runtime_error("A search is already pending");
+    // In this Chromium version false only counts/highlights; true also
+    // selects a match.  Explicitly reset a new search, then select its match.
+    if (![request[@"next"] boolValue]) browser->GetHost()->StopFinding(true);
+    page->pendingFind = utf8(request[@"token"]);
+    browser->GetHost()->Find(utf8(request[@"text"]), [request[@"forward"] boolValue], false, true);
+  }
+  else if (action == "find-stop") {
+    page->pendingFind.clear();
+    browser->GetHost()->StopFinding(true);
+  }
+  else if (action == "selected") page->selected = argument == "1";
+  else if (action == "focus") browser->GetHost()->SetFocus(true);
+  else if (action == "unfocus") unfocus(page);
+  else if (action == "focus-parent") {
+    auto current = browser->GetFocusedFrame();
+    auto target = argument == "root" || !current ? browser->GetMainFrame() : current->GetParent();
+    if (!target || !target->IsValid()) target = browser->GetMainFrame();
+    if (current && current->IsValid())
+      current->ExecuteJavaScript("window.__emacsWebScroller?.reset();", "", 1);
+    if (target && target->IsValid()) {
+      target->ExecuteJavaScript(
+        "(()=>{window.__emacsWebScroller?.reset();"
+        "let e=document.activeElement;while(e?.shadowRoot?.activeElement)e=e.shadowRoot.activeElement;"
+        "window.focus();if(e?.matches('iframe,frame'))e.blur();})();", "", 1);
+    }
+    unfocus(page);
+  }
+  else if (action == "click") {
+    NSData* data = [ns(argument) dataUsingEncoding:NSUTF8StringEncoding];
+    NSDictionary* point = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![point isKindOfClass:NSDictionary.class] ||
+        ![point[@"x"] isKindOfClass:NSNumber.class] ||
+        ![point[@"y"] isKindOfClass:NSNumber.class] ||
+        ![point[@"newBuffer"] isKindOfClass:NSNumber.class])
+      throw std::runtime_error("Invalid click coordinates");
+    // DOM rectangles are CSS pixels, CEF input coordinates are view DIPs.
+    const double zoom = std::pow(1.2, browser->GetHost()->GetZoomLevel());
+    const double x = [point[@"x"] doubleValue] * zoom;
+    const double y = [point[@"y"] doubleValue] * zoom;
+    if (page->container.hidden || !std::isfinite(x) || !std::isfinite(y) ||
+        x < 0 || y < 0 || x >= NSWidth(page->container.bounds) || y >= NSHeight(page->container.bounds))
+      throw std::runtime_error("Hint target is outside the visible browser view");
+    CefMouseEvent event;
+    event.x = static_cast<int>(x);
+    event.y = static_cast<int>(y);
+    event.modifiers = [point[@"newBuffer"] boolValue] ? EVENTFLAG_COMMAND_DOWN : 0;
+    if (event.modifiers && ![point[@"background"] boolValue]) event.modifiers |= EVENTFLAG_SHIFT_DOWN;
+    // Hint clicks start in Emacs command mode.  Dispatching a Chromium mouse
+    // event does not require giving the native view keyboard focus.  Editable
+    // hint targets use the separate "focus" command instead.
+    browser->GetHost()->SendMouseMoveEvent(event, false);
+    browser->GetHost()->SendMouseClickEvent(event, MBT_LEFT, false, 1);
+    browser->GetHost()->SendMouseClickEvent(event, MBT_LEFT, true, 1);
+  }
+  else if (action == "eval") {
+    NSData* data = [ns(argument) dataUsingEncoding:NSUTF8StringEncoding];
+    NSDictionary* request = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![request isKindOfClass:NSDictionary.class] ||
+        ![request[@"token"] isKindOfClass:NSString.class] ||
+        ![request[@"script"] isKindOfClass:NSString.class])
+      throw std::runtime_error("Invalid JavaScript request");
+    page->pendingEval = utf8(request[@"token"]);
+    auto message = CefProcessMessage::Create("web.eval");
+    message->GetArgumentList()->SetString(0, page->pendingEval);
+    message->GetArgumentList()->SetString(1, utf8(request[@"script"]));
+    browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, message);
+  }
+  else if (action == "javascript") {
+    browser->GetMainFrame()->ExecuteJavaScript(argument, "", 1);
+  }
+  else if (action == "javascript-focused") {
+    // Route through CEF, not top.document: focused subframes may be cross-origin
+    // and hosted in a different renderer.  Releasing Cocoa keyboard focus does
+    // not change Chromium's focused frame.
+    auto frame = browser->GetFocusedFrame();
+    if (!frame || !frame->IsValid()) frame = browser->GetMainFrame();
+    if (frame && frame->IsValid()) frame->ExecuteJavaScript(argument, "", 1);
+  }
+  else if (action == "javascript-frame") {
+    NSData* data = [ns(argument) dataUsingEncoding:NSUTF8StringEncoding];
+    NSDictionary* request = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![request isKindOfClass:NSDictionary.class] ||
+        ![request[@"frame"] isKindOfClass:NSString.class] ||
+        ![request[@"script"] isKindOfClass:NSString.class])
+      throw std::runtime_error("Invalid frame script request");
+    auto frame = browser->GetFrameByIdentifier(utf8(request[@"frame"]));
+    if (frame && frame->IsValid()) frame->ExecuteJavaScript(utf8(request[@"script"]), "", 1);
+  }
+  else if (action == "test-key" && testMode) {
+    if (argument != "j" && argument != "k" && argument != "escape") throw std::runtime_error("Unsupported test key");
+    // Exercise real Cocoa -> CEF keyboard dispatch, not the Lisp scroll command.
+    NSString* characters = argument == "escape" ? @"\x1b" : ns(argument);
+    for (auto type : {NSEventTypeKeyDown, NSEventTypeKeyUp}) {
+      NSEvent* event = [NSEvent keyEventWithType:type location:NSZeroPoint modifierFlags:0
+        timestamp:NSProcessInfo.processInfo.systemUptime windowNumber:page->container.window.windowNumber
+        context:nil characters:characters charactersIgnoringModifiers:characters
+        isARepeat:NO keyCode:argument == "escape" ? 53 : (argument == "j" ? 38 : 40)];
+      if (argument == "escape") [NSApp postEvent:event atStart:NO];
+      else [NSApp sendEvent:event];
+    }
+  }
+  else if (action == "devtools") {
+    CefWindowInfo wi;
+    CefBrowserSettings settings;
+    browser->GetHost()->ShowDevTools(wi, new Client(0), settings, CefPoint());
+  } else if (action == "close") {
+    unfocus(page);
+    page->closing = true;
+    page->container.hidden = YES;
+    browser->GetHost()->CloseBrowser(true);
+  } else throw std::runtime_error("Unknown browser action");
+}
+
+void pump() {
+  requireReady();
+  if (pumping) return;
+  pumping = true;
+  CefDoMessageLoopWork();
+  pumping = false;
+}
+std::string events() {
+  requireReady();
+  NSData* data = [NSJSONSerialization dataWithJSONObject:queue options:0 error:nil];
+  [queue removeAllObjects];
+  return std::string((const char*)data.bytes, data.length);
+}
+std::string info() {
+  requireReady();
+  return "CEF " CEF_VERSION "\nRuntime: Alloy (native child NSView)\nMessage pump: external (Emacs timer)\nSandbox: enabled\nPages: " +
+    std::to_string(pages.size()) + "\nBrowsers including DevTools: " +
+    std::to_string(browsers.size()) + "\nKeychain: " +
+    (testMode ? "mock (disposable tests only)" : "system") + "\nProfile: " + profilePath;
+}
+std::string inspect(int id) {
+  requireReady();
+  auto page = pageFor(id);
+  NSRect rect = page->container.frame;
+  NSView* host = page->host;
+  double top = host.isFlipped ? rect.origin.y : NSHeight(host.bounds) - NSMaxY(rect);
+  auto focusedFrame = page->browser ? page->browser->GetFocusedFrame() : nullptr;
+  NSDictionary* state = @{@"x": @(rect.origin.x), @"y": @(top),
+    @"width": @(rect.size.width), @"height": @(rect.size.height),
+    @"window": @(page->container.window.windowNumber),
+    @"hidden": @(page->container.hidden), @"focused": @(ownsFocus(page)),
+    @"focusedFrameName": focusedFrame ? ns(focusedFrame->GetName().ToString()) : @"",
+    @"hostClass": NSStringFromClass(host.class) ?: @"detached"};
+  NSData* data = [NSJSONSerialization dataWithJSONObject:state options:0 error:nil];
+  return std::string((const char*)data.bytes, data.length);
+}
+void shutdown() {
+  checkThread();
+  if (!initialized || stopped) return;
+  // Copy: CloseBrowser may synchronously modify the live map.
+  auto closing = browsers;
+  for (const auto& item : closing) item.second->GetHost()->CloseBrowser(true);
+  closing.clear();
+  const auto deadline = [NSDate dateWithTimeIntervalSinceNow:3.0];
+  while (!browsers.empty() && deadline.timeIntervalSinceNow > 0) {
+    CefDoMessageLoopWork();
+    [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                           beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.005]];
+  }
+  // Calling CefShutdown with live browsers can crash.  On process exit the OS
+  // will reclaim a stuck renderer; keep the framework loaded in that case.
+  if (browsers.empty()) {
+    pages.clear();
+    CefShutdown();
+  } else {
+    NSLog(@"Web: skipping CefShutdown because %zu browsers did not close", browsers.size());
+  }
+  stopped = true;
+}
+}  // namespace web

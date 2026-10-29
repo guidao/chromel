@@ -1,0 +1,28 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>scroll-modal-ready</title>
+<style>
+  body {margin:0;height:3000px}
+  #panel {position:fixed;left:0;top:70px;width:220px;height:180px;overflow:auto;background:#ccc}
+  .content {height:900px}
+  #buttons {position:fixed;left:250px;top:0}
+  dialog {width:420px;height:320px;padding:12px}
+  .viewport {height:160px;overflow:auto;border:1px solid}
+  #overlay {position:fixed;inset:35px 150px;background:white;z-index:999;padding:20px}
+</style>
+<div id="panel"><div class="content"><p>Nonfocusable panel content</p></div></div>
+<div id="buttons">
+  <button id="open-native" onclick="document.body.style.overflow='hidden';document.getElementById('native').showModal()">Native dialog</button>
+  <button id="open-overlay" onclick="document.body.style.overflow='hidden';document.getElementById('overlay').hidden=false">ARIA overlay</button>
+</div>
+<dialog id="native">
+  <button id="close-native" onclick="document.getElementById('native').close();document.body.style.overflow=''">Close</button>
+  <div id="native-scroll" class="viewport"><div class="content">Native dialog contents</div></div>
+  <input id="text" aria-label="Text input">
+  <div id="editable" contenteditable style="border:1px solid;min-height:20px">edit:</div>
+  <select id="select"><option>Apple</option><option>Kiwi</option><option>Jackfruit</option></select>
+</dialog>
+<div id="overlay" role="dialog" aria-modal="true" hidden>
+  <button id="close-overlay" onclick="document.getElementById('overlay').hidden=true;document.body.style.overflow=''">Close</button>
+  <div id="overlay-scroll" class="viewport"><div class="content">ARIA overlay contents</div></div>
+</div>

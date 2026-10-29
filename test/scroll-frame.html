@@ -1,0 +1,16 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>body {margin:0;height:2500px;background:#eee} button {position:fixed;left:0;top:0;width:160px;height:40px}</style>
+<button id="focus">Focus __FRAME_ID__</button>
+__NESTED__
+<script>
+const id = '__FRAME_ID__', samples = [];
+let focused = false;
+function report() { parent.postMessage({kind:'scroll-test',id,y:scrollY,focused,samples:[...samples]}, '*'); }
+document.getElementById('focus').addEventListener('click', () => {focused=true;report()});
+window.addEventListener('scroll', () => {samples.push(scrollY);report()});
+window.addEventListener('message', event => {
+  if (event.data?.kind === 'scroll-test') parent.postMessage(event.data, '*');
+});
+report();
+</script>

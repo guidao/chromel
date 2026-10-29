@@ -1,0 +1,92 @@
+;;; gui-session.el --- Persist and restore across independent GUI processes -*- lexical-binding: t; -*-
+(require 'web)
+(setq web-data-directory (file-name-as-directory (getenv "WEB_TEST_PROFILE")))
+(defvar web-test--tabs nil)
+(defvar web-test--busy nil)
+(defvar web-test--phase 'loading)
+(defvar web-test--deadline (+ (float-time) 45))
+(defvar web-test--restore (equal (getenv "WEB_TEST_SESSION_PHASE") "restore"))
+(defun web-test--assert (value text) (unless value (error "%s" text)))
+(defun web-test--finish (ok text)
+  (with-temp-file (getenv "WEB_TEST_RESULT") (insert (if ok "PASS: " "FAIL: ") text "\n"))
+  (kill-emacs (if ok 0 1)))
+(defun web-test--loaded (buffer)
+  (and (buffer-live-p buffer) (buffer-local-value 'web--id buffer)
+       (string-prefix-p "web-emacs-" (buffer-local-value 'web--title buffer))
+       (equal "" (buffer-local-value 'web--status buffer))))
+(defun web-test--urls () (mapcar (lambda (b) (buffer-local-value 'web--url b)) (web--buffers)))
+(defun web-test--step ()
+  (unless web-test--busy
+    (let ((web-test--busy t))
+      (with-current-buffer (window-buffer (selected-window))
+        (condition-case err
+            (progn
+              (when (> (float-time) web-test--deadline) (error "Session GUI timed out"))
+              (pcase web-test--phase
+                ('loading
+                 (if web-test--restore
+                     (when (web-test--loaded (nth 1 web-test--tabs))
+                       (web-test--assert (= 1 (hash-table-count web--pages)) "Restore created background browsers")
+                       (web-test--assert (eq (window-buffer (selected-window)) (nth 1 web-test--tabs)) "Saved selected page lost")
+                       (web-test--assert (equal (buffer-local-value 'web--title (nth 2 web-test--tabs)) "会话三 😀") "Deferred title not restored")
+                       (web-test--assert (equal (web-test--urls)
+                                                (list (getenv "WEB_TEST_URL")
+                                                      (concat (getenv "WEB_TEST_URL") "?session=two")
+                                                      (concat (getenv "WEB_TEST_URL") "?session=three"))) "Tab order or URLs lost")
+                       (web-test--assert (eq t (web--eval "JSON.stringify(localStorage.getItem('web-test')==='saved' && document.cookie.includes('web-test=saved'))")) "Restored page did not share existing profile")
+                       (let (rejected)
+                         (condition-case nil (web-restore-session) (user-error (setq rejected t)))
+                         (web-test--assert rejected "Restored the same session twice"))
+                       ;; This is an ordinary Emacs buffer switch, not our tab command.
+                       (switch-to-buffer (nth 2 web-test--tabs))
+                       (setq web-test--phase 'activated))
+                   (when (cl-every #'web-test--loaded web-test--tabs)
+                     (with-current-buffer (nth 2 web-test--tabs)
+                       (web--eval "JSON.stringify((document.title='会话三 😀',true))"))
+                     (web--select-buffer (nth 1 web-test--tabs))
+                     (kill-buffer (nth 3 web-test--tabs))
+                     (execute-kbd-macro (kbd "X"))
+                     (web-test--assert (string-suffix-p "?session=closed" web--url) "X did not restore closed page")
+                     (web-test--assert (eq (current-buffer) (nth 3 (web--buffers))) "X restored at wrong position")
+                     (execute-kbd-macro (kbd "x"))
+                     (web--select-buffer (nth 1 web-test--tabs))
+                     (setq web-test--phase 'saved))))
+                ('saved
+                 ;; Check the autosaved file BEFORE kill-emacs can flush it.
+                 (let ((file (expand-file-name "session.json" web-data-directory)))
+                   (when (and (file-exists-p file) (not web--session-dirty)
+                              (equal (buffer-local-value 'web--title (nth 2 web-test--tabs)) "会话三 😀"))
+                     (let ((saved (web--session-read file)))
+                       (web-test--assert (= 3 (length (plist-get saved :tabs))) "Autosave omitted open tabs")
+                       (web-test--assert (= 1 (plist-get saved :selected)) "Autosave lost selected tab")
+                       (web-test--assert (string-suffix-p "?session=closed" (plist-get (aref (plist-get saved :closed) 0) :url)) "Closed history not persisted")
+                       (web-test--finish t "Session seed: real X/x restores original position; autosave contains ordered tabs, Unicode title, selection and closed history")))))
+                ('activated
+                 (when (web-test--loaded (nth 2 web-test--tabs))
+                   (web-test--assert (= 2 (hash-table-count web--pages)) "Switching a deferred tab created extra browsers")
+                   (web-test--assert (buffer-local-value 'web--pending (car web-test--tabs)) "Unselected deferred tab was loaded")
+                   (kill-buffer (car web-test--tabs))
+                   (web-test--assert (= 2 (hash-table-count web--pages)) "Closing a deferred tab created a browser")
+                   (execute-kbd-macro (kbd "X"))
+                   (web-test--assert (eq (current-buffer) (car (web--buffers))) "X lost deferred tab's position")
+                   (web-test--assert (= 3 (hash-table-count web--pages)) "X did not materialize exactly one browser")
+                   (setq web-test--phase 'reopened)))
+                ('reopened
+                 (when (web-test--loaded (car (web--buffers)))
+                   (web-test--assert (eq :false (plist-get (json-parse-string (web--native-inspect web--id) :object-type 'plist) :focused)) "X stole Emacs command focus")
+                   (web-test--finish t "Session restore: separate process, one initial browser, lazy activation via normal buffer switch, deferred close/X, saved order/selection/profile and no duplicates")))))
+          (error (web-test--finish nil (format "%s (phase %s)" (error-message-string err) web-test--phase))))))))
+(run-at-time 1 nil
+             (lambda ()
+               (condition-case err
+                   (progn
+                     (if web-test--restore
+                         (setq web-test--tabs (web-restore-session))
+                       (setq web-test--tabs
+                             (list (web (getenv "WEB_TEST_URL"))
+                                   (web (concat (getenv "WEB_TEST_URL") "?session=two") t)
+                                   (web (concat (getenv "WEB_TEST_URL") "?session=three") t)
+                                   (web (concat (getenv "WEB_TEST_URL") "?session=closed") t))
+                             web--closed-tabs nil))
+                     (run-at-time 0.1 0.1 #'web-test--step))
+                 (error (web-test--finish nil (error-message-string err))))))

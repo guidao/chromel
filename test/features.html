@@ -1,0 +1,12 @@
+<!doctype html><meta charset="utf-8"><title>features-ready</title>
+<style>body{margin:0;height:4000px;font:18px sans-serif}nav{position:fixed;left:0;top:0;background:white;z-index:3}#panel{position:fixed;left:0;top:100px;width:230px;height:200px;overflow:auto;background:#eee;z-index:2}#panel>div{height:1000px}iframe{position:fixed;left:500px;top:100px;width:230px;height:180px;border:0}article{padding-top:400px;margin-left:260px}article p{margin-bottom:900px}</style>
+<nav><a href="/feature-target/a" id="a">First link</a> <a href="/feature-target/b" id="b">Second link</a> <a href="/feature-target/中文?a=1&amp;b=2" id="unicode">中文 link</a> <a href="/blocked" id="blocked">Intercepted link</a> <button id="button">Not a link</button></nav>
+<a href="/hidden" style="display:none">Hidden link</a>
+<div id="panel"><div><button>Panel control</button><p>Scrollable panel</p></div></div>
+<article><p>NeedleFeature 中文检索</p><p>NeedleFeature 中文检索</p><p>NeedleFeature 中文检索 [literal.*]</p></article>
+<iframe name="feature-child" src="__OTHER__/feature-frame"></iframe>
+<script>window.childState=null;window.intercepts=0;window.clicks=0;
+addEventListener('message',e=>{if(e.source===document.querySelector('iframe').contentWindow)childState=e.data});
+document.querySelector('#blocked').onclick=e=>{e.preventDefault();intercepts++};
+document.querySelector('nav').addEventListener('click',e=>{if(e.target.closest('a'))clicks++});
+</script>

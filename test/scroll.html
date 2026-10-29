@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>scroll-ready</title>
+<style>body {margin:0; height:4000px} iframe {position:fixed;top:60px;width:260px;height:240px;border:0}</style>
+<button style="position:fixed;top:0;left:0;width:120px;height:40px" id="outer">Outer focus</button>
+<iframe id="same" name="same" src="/scroll-frame/same" style="left:0"></iframe>
+<iframe id="cross" name="cross" src="__OTHER__/scroll-frame/cross" style="left:300px"></iframe>
+<script>
+window.frameState = {};
+window.addEventListener('message', event => {
+  if (event.data?.kind === 'scroll-test') frameState[event.data.id] = event.data;
+});
+document.title = 'scroll-ready';
+</script>
