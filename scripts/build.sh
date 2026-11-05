@@ -20,6 +20,29 @@ if [[ ! -f "$EMACS_INCLUDE_DIR/emacs-module.h" ]]; then
   echo 'Set EMACS_INCLUDE_DIR to the directory containing emacs-module.h.' >&2
   exit 1
 fi
+# CMake caches absolute source/build paths, which become stale after a move.
+python3 - <<'PY'
+from pathlib import Path
+import shutil
+
+root = Path.cwd().resolve()
+build = root / "build"
+cache = build / "CMakeCache.txt"
+if cache.is_file():
+    paths = {}
+    for line in cache.read_text().splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            paths[key] = value
+    expected = {"CMAKE_HOME_DIRECTORY:INTERNAL": root,
+                "CMAKE_CACHEFILE_DIR:INTERNAL": build.resolve()}
+    if any(key in paths and Path(paths[key]).resolve() != path
+           for key, path in expected.items()):
+        print("Project moved; resetting CMake cache for the current directory.")
+        cache.unlink()
+        if (build / "CMakeFiles").is_dir():
+            shutil.rmtree(build / "CMakeFiles")
+PY
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
   -DCEF_ROOT="$CEF_ROOT" -DEMACS_INCLUDE_DIR="$EMACS_INCLUDE_DIR" \
   -DCMAKE_OSX_SYSROOT="$(xcrun --show-sdk-path)"

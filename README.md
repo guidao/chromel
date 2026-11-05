@@ -1,26 +1,19 @@
 # Chromel — Emacs 中的原生 CEF 浏览器
 
-原名 Web，现已统一使用 `chromel` 命令和 `chromel-` 符号前缀，避免与网页编辑插件的 `web-mode` 冲突。源码目录可以仍叫 `web`，以下路径沿用当前目录名。
-
-从旧版升级：先完整退出使用旧模块的 Emacs，重新运行 `./scripts/build.sh`，将配置中的 `(require 'web)` 改为 `(require 'chromel)`，并将自定义变量、hook 和命令的 `web-` 前缀改为 `chromel-`。安装到现有 Emacs.app 的用户需重新运行安装器以更新 Helper；独立副本用户运行 `./scripts/launch.sh`。旧安装标记和备份可继续用于升级、恢复。不提供旧符号别名，以免重新引入命名冲突。
-
-已有 `web/` 数据目录且尚无 `chromel/` 时会继续使用旧目录，保留 profile、历史和会话，不自动搬移数据。如果原来配置了自定义 `web-data-directory`，请把变量名改为 `chromel-data-directory`，目录值保持原样。
-
-macOS 实验性插件：一个网页对应一个 Emacs buffer，Chromium 视图作为 Emacs 窗口内的 `NSView` 显示。借鉴 Appine 的同进程原生视图方案，使用 CEF 替代 WebKit，不依赖 Qt，不需要修改或重新编译 Emacs 源码；可以安装到现有 `Emacs.app`，也可以使用独立应用副本。
+Chromel 是 macOS 上的 Emacs 原生浏览器插件：一个网页对应一个 Emacs buffer，Chromium 视图作为 Emacs 窗口内的 `NSView` 显示。借鉴 Appine 的同进程原生视图方案，使用 CEF 替代 WebKit，不依赖 Qt，不需要修改或重新编译 Emacs 源码；可以安装到现有 `Emacs.app`，也可以使用独立应用副本。
 
 **这是浏览器插件的第一版，不是完整 Chrome。** 普通网页使用 Alloy 模式嵌入 Emacs，设置页使用独立的 Chrome-style 窗口。这一版有网页渲染、导航、独立 profile、Chromium 设置页、浏览历史和 DevTools；支持在 Chromium 密码管理页添加凭据并自动填充到内嵌网页；尚未验证首次登录后的保存提示，支持 Chrome Web Store 安装和原生扩展管理；没有实现 Chrome 同步、书签管理或下载管理。
 
-本次更新接入 Chrome Web Store 和扩展管理，涉及原生模块和 Elisp。**更新原生模块后需要完整重启浏览器所在的 Emacs；仅重新加载 `chromel.el` 不足以更新。** 安装到现有应用的用户在 CEF 或 Helper 更新后重新运行安装脚本；独立副本用户通过 `./scripts/launch.sh` 刷新宿主。
-
-`X` 恢复关闭页面、会话自动保存和延迟恢复仍可使用。
-键位已对齐 Vimium：`g` 刷新改为 `r`，`G` 改为滚动到底部，`b` 后退改为 `H`，`F` 改为后台打开链接。
+提供 Vimium 风格的键位、关闭页面恢复、会话自动保存和延迟恢复。Meow 是可选适配，不需要安装即可使用全部浏览器键位。
 
 ## 开始使用
 
 要求：macOS 13+、Cocoa/NS 版 Emacs 29+（启用动态模块）、Xcode Command Line Tools、CMake、Python 3。原生模块必须与运行 Emacs 的 CPU 架构一致。当前本机验证环境是 Apple Silicon + Emacs 32。
 
+将源码放在任意目录。以下示例中的 `/path/to/chromel` 请替换为实际的源码目录，后续命令均在该目录执行。
+
 ```sh
-cd ~/code/elisp/web
+cd /path/to/chromel
 ./scripts/build.sh
 ```
 
@@ -31,7 +24,7 @@ cd ~/code/elisp/web
 先退出目标 Emacs，在系统终端执行：
 
 ```sh
-cd ~/code/elisp/web
+cd /path/to/chromel
 python3 scripts/install-app.py /Applications/Emacs.app
 ```
 
@@ -56,7 +49,7 @@ python3 scripts/install-app.py /Applications/Emacs.app --dry-run
 
 ### 使用独立副本
 
-不想修改现有应用时，仍可使用项目启动脚本：
+不想修改现有应用时，可以使用项目启动脚本：
 
 ```sh
 ./scripts/launch.sh
@@ -89,7 +82,8 @@ EMACS_INCLUDE_DIR=/path/to/emacs/include ./scripts/build.sh
 安装到现有 Emacs.app 后，或从 `build/EmacsChromel.app` 自行启动时，把下面配置加入 Emacs。使用启动脚本时不需要重复配置。构建完成后不需要每次启动都重新构建。
 
 ```elisp
-(add-to-list 'load-path (expand-file-name "~/code/elisp/web"))
+;; 替换为实际的源码目录。
+(add-to-list 'load-path "/path/to/chromel")
 (require 'chromel)
 
 ;; 可选；必须在首次打开网页之前设置。
@@ -193,7 +187,7 @@ Meow 用户：`chromel-mode` 默认使用 **motion** 状态，浏览器键位定
 3. 返回 Emacs，重新加载需要使用扩展的页面。
 4. 执行 `M-x chromel-extensions`（`C-c w e`）管理已安装扩展：启用/禁用、网站权限、扩展选项、快捷键和卸载。
 
-`chrome://extensions/`、其子页面及 `https://chromewebstore.google.com/` 都自动进入共享的 Chrome-style 管理窗口。从内嵌网页导航到商店也会转交，并保留原 buffer。管理窗口现在包含 Chromium 原生工具栏，可后退、查看地址和访问扩展菜单。它与设置/密码管理页复用窗口和 profile，不使用日常 Google Chrome 的扩展目录。
+`chrome://extensions/`、其子页面及 `https://chromewebstore.google.com/` 都自动进入共享的 Chrome-style 管理窗口。从内嵌网页导航到商店也会转交，并保留原 buffer。管理窗口包含 Chromium 原生工具栏，可后退、查看地址和访问扩展菜单。它与设置/密码管理页复用窗口和 profile，不使用日常 Google Chrome 的扩展目录。
 
 安装、权限确认、CRX 校验及扩展更新由 Chromium 的原生机制负责；插件不自行解包 CRX 或静默授予权限。扩展和状态保存在 `chromel-data-directory` 对应的 Chromium profile 中。安装时可能出现扩展自己的欢迎页或其他 Chrome 窗口；这些窗口纳入退出时的关闭管理，避免在仍有浏览器存活时销毁 CEF。
 
@@ -345,9 +339,9 @@ emacs -Q --batch -L . -l test/chromel-test.el -l test/chromel-session-test.el -f
 可选的 Meow 测试需要把 Meow 安装目录加入 load-path：
 
 ```sh
-emacs -Q --batch -L . -L ~/.emacs.d/elpa/meow -l test/chromel-meow-test.el -f ert-run-tests-batch-and-exit
+emacs -Q --batch -L . -L /path/to/meow -l test/chromel-meow-test.el -f ert-run-tests-batch-and-exit
 # 反向加载顺序：
-emacs -Q --batch -L . -L ~/.emacs.d/elpa/meow -l chromel -l test/chromel-meow-test.el -f ert-run-tests-batch-and-exit
+emacs -Q --batch -L . -L /path/to/meow -l chromel -l test/chromel-meow-test.el -f ert-run-tests-batch-and-exit
 ```
 
 独立 GUI 集成测试先构建测试专用的消息循环探针，再启动 `-Q` Emacs，使用自动清理的临时 profile，不加载你的个人配置：
