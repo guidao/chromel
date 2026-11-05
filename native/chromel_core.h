@@ -2,7 +2,7 @@
 #pragma once
 #include <string>
 
-namespace web {
+namespace chromel {
 void initialize(const std::string& bundle, const std::string& profile);
 long bind_window(const std::string& title);
 int create(long window, const std::string& url);

@@ -3,7 +3,7 @@
 (function (alphabet, session, mode) {
   "use strict";
   mode = mode || "activate";
-  window.__emacsWebHints?.clear();
+  window.__emacsChromelHints?.clear();
   function parent(element) {
     return element.parentElement || element.getRootNode().host || null;
   }
@@ -104,7 +104,7 @@
   // Bound the response and overlay work on unusually dense pages.
   entries.splice(1000);
   const host = document.createElement("div");
-  host.setAttribute("data-emacs-web-hints", session);
+  host.setAttribute("data-emacs-chromel-hints", session);
   host.setAttribute("popover", "manual");
   host.style.cssText = "all:initial!important;position:fixed!important;inset:0!important;"
     + "z-index:2147483647!important;pointer-events:none!important;display:block!important;"
@@ -140,10 +140,10 @@
     host.remove();
     window.removeEventListener("scroll", onScroll, true);
     window.removeEventListener("resize", onScroll);
-    if (window.__emacsWebHints?.session === session) delete window.__emacsWebHints;
+    if (window.__emacsChromelHints?.session === session) delete window.__emacsChromelHints;
     return true;
   }
-  window.__emacsWebHints = {
+  window.__emacsChromelHints = {
     session, clear,
     filter(prefix) {
       for (const entry of entries) entry.badge.hidden = !entry.label.startsWith(prefix);

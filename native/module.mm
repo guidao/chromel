@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <emacs-module.h>
-#include "web_core.h"
+#include "chromel_core.h"
 #include <exception>
 #include <string>
 #include <vector>
@@ -37,17 +37,17 @@ emacs_value call(emacs_env* env, ptrdiff_t, emacs_value* args, void* data) noexc
     if (op == Command) { first = string(1); second = string(2); }
     if (env->non_local_exit_check(env) != emacs_funcall_exit_return) return nil;
     switch (op) {
-      case Init: web::initialize(first, second); break;
-      case Bind: return env->make_integer(env, web::bind_window(first));
-      case Create: return env->make_integer(env, web::create(numbers[0], first));
-      case Layout: web::layout(numbers[0], numbers[1], numbers[2], numbers[3], numbers[4], numbers[5]); break;
-      case Hide: web::hide(numbers[0]); break;
-      case Command: web::command(numbers[0], first, second); break;
-      case Pump: web::pump(); break;
-      case Events: return result(env, web::events());
-      case Info: return result(env, web::info());
-      case Inspect: return result(env, web::inspect(numbers[0]));
-      case Shutdown: web::shutdown(); break;
+      case Init: chromel::initialize(first, second); break;
+      case Bind: return env->make_integer(env, chromel::bind_window(first));
+      case Create: return env->make_integer(env, chromel::create(numbers[0], first));
+      case Layout: chromel::layout(numbers[0], numbers[1], numbers[2], numbers[3], numbers[4], numbers[5]); break;
+      case Hide: chromel::hide(numbers[0]); break;
+      case Command: chromel::command(numbers[0], first, second); break;
+      case Pump: chromel::pump(); break;
+      case Events: return result(env, chromel::events());
+      case Info: return result(env, chromel::info());
+      case Inspect: return result(env, chromel::inspect(numbers[0]));
+      case Shutdown: chromel::shutdown(); break;
     }
     return env->intern(env, "t");
   } catch (const std::exception& error) {
@@ -76,14 +76,14 @@ extern "C" int emacs_module_init(emacs_runtime* runtime) noexcept {
     {"shutdown", 0, Shutdown, "Close browsers and shut down CEF before Emacs exits."}
   };
   for (const auto& entry : entries) {
-    auto name = std::string("web--native-") + entry.name;
+    auto name = std::string("chromel--native-") + entry.name;
     emacs_value args[] = {
       env->intern(env, name.c_str()),
       env->make_function(env, entry.count, entry.count, call, entry.doc,
                          reinterpret_cast<void*>(static_cast<intptr_t>(entry.op)))};
     env->funcall(env, env->intern(env, "fset"), 2, args);
   }
-  emacs_value feature = env->intern(env, "web-module");
+  emacs_value feature = env->intern(env, "chromel-module");
   env->funcall(env, env->intern(env, "provide"), 1, &feature);
   return 0;
 }

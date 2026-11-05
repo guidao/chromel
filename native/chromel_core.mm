@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #import <Cocoa/Cocoa.h>
 #import <objc/runtime.h>
-#include "web_core.h"
+#include "chromel_core.h"
+#include "host_wakeup.h"
 #include "include/cef_app.h"
 #include "include/cef_application_mac.h"
 #include "include/cef_browser.h"
 #include "include/views/cef_browser_view.h"
+#include "include/views/cef_box_layout.h"
 #include "include/views/cef_window.h"
 #include "include/cef_browser_process_handler.h"
 #include "include/cef_client.h"
@@ -61,6 +63,7 @@ NSMapTable<NSNumber*, NSWindow*>* windows;
 bool initialized = false;
 bool stopped = false;
 bool pumping = false;
+std::unique_ptr<ChromelHostWakeup> hostWakeup;
 int nextId = 1;
 std::string profilePath;
 bool testMode = false;
@@ -130,7 +133,7 @@ void stopScroll(const std::shared_ptr<Page>& page, bool cancel = true) {
   if (page->browser && !page->scrollFrame.empty()) {
     auto frame = page->browser->GetFrameByIdentifier(page->scrollFrame);
     if (frame && frame->IsValid()) frame->ExecuteJavaScript(
-      cancel ? "window.__emacsWebScroller?.cancel();" : "window.__emacsWebScroller?.release();", "", 1);
+      cancel ? "window.__emacsChromelScroller?.cancel();" : "window.__emacsChromelScroller?.release();", "", 1);
   }
   page->scrollHeld = false;
   page->scrollKey = 0;
@@ -142,7 +145,7 @@ void scrollPage(const std::shared_ptr<Page>& page, CefRefPtr<CefFrame> frame,
   held = held && mode == "pixels" && page->physicalKey == (amount > 0 ? 'j' : 'k');
   const auto frameId = frame->GetIdentifier().ToString();
   if (held && page->scrollHeld && page->scrollFrame == frameId && page->scrollKey == page->physicalKey) {
-    frame->ExecuteJavaScript("window.__emacsWebScroller?.repeat();", "", 1);
+    frame->ExecuteJavaScript("window.__emacsChromelScroller?.repeat();", "", 1);
     return;
   }
   if (page->scrollHeld) {
@@ -153,7 +156,7 @@ void scrollPage(const std::shared_ptr<Page>& page, CefRefPtr<CefFrame> frame,
   page->scrollFrame = frameId;
   page->scrollHeld = held;
   page->scrollKey = held ? page->physicalKey : 0;
-  const auto prefix = held ? "window.__emacsWebScroller?.hold(" : "window.__emacsWebScroller?.scroll(";
+  const auto prefix = held ? "window.__emacsChromelScroller?.hold(" : "window.__emacsChromelScroller?.scroll(";
   const auto args = std::to_string(amount) + "," + std::to_string(duration) + "," +
     (held ? std::to_string(speed) : "\"" + mode + "\"");
   frame->ExecuteJavaScript(prefix + args + ");", "", 1);
@@ -176,8 +179,10 @@ NSEvent* routeKeyEvent(NSEvent* event);
 void sendEvent(id self, SEL cmd, NSEvent* event) {
   event = routeKeyEvent(event);
   if (!event) return;
+  const bool foreignInput = hostWakeup && ChromelHostWakeup::foreignInput(event);
   CefScopedSendingEvent scope;
   reinterpret_cast<void (*)(id, SEL, NSEvent*)>(originalSendEvent)(self, cmd, event);
+  if (foreignInput && hostWakeup) hostWakeup->schedule();
 }
 void adaptApplication() {
   if ([NSApp conformsToProtocol:@protocol(CefAppProtocol)]) return;
@@ -198,6 +203,7 @@ void adaptApplication() {
 class App final : public CefApp, public CefBrowserProcessHandler {
  public:
   CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override { return this; }
+  CefRefPtr<CefClient> GetDefaultClient() override;
   void OnScheduleMessagePumpWork(int64_t /*delayMs*/) override {
     // Emacs already schedules pump() on its main thread every 20 ms, including
     // while waiting in the minibuffer.  That recurring timer coalesces requests
@@ -213,6 +219,8 @@ class App final : public CefApp, public CefBrowserProcessHandler {
  private:
   IMPLEMENT_REFCOUNTING(App);
 };
+
+bool isSettingsURL(const std::string& url);
 
 class Client final : public CefClient,
                      public CefLifeSpanHandler,
@@ -266,7 +274,7 @@ class Client final : public CefClient,
   }
   bool OnProcessMessageReceived(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame,
                                 CefProcessId source, CefRefPtr<CefProcessMessage> message) override {
-    if (source == PID_RENDERER && message->GetName() == "web.input-focus") {
+    if (source == PID_RENDERER && message->GetName() == "chromel.input-focus") {
       auto found = pages.find(id_);
       if (found != pages.end() && !found->second->closing && frame) {
         found->second->inputFrame = frame->GetIdentifier().ToString();
@@ -274,7 +282,7 @@ class Client final : public CefClient,
       }
       return true;
     }
-    if (source != PID_RENDERER || message->GetName() != "web.eval.result" || !frame->IsMain())
+    if (source != PID_RENDERER || message->GetName() != "chromel.eval.result" || !frame->IsMain())
       return false;
     auto found = pages.find(id_);
     auto args = message->GetArgumentList();
@@ -330,6 +338,16 @@ class Client final : public CefClient,
     if (userGesture && !url.empty())
       emit(id_, disposition == CEF_WOD_NEW_BACKGROUND_TAB ? @"popup-background" : @"popup", ns(url.ToString()));
     return true;
+  }
+  bool OnBeforeBrowse(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame,
+                      CefRefPtr<CefRequest> request, bool, bool) override {
+    // The Web Store installer and management WebUIs need a Chrome-style host.
+    // Defer window creation to Emacs's event queue, outside the CEF callback.
+    if (id_ > 0 && frame->IsMain() && isSettingsURL(request->GetURL().ToString())) {
+      emit(id_, @"chrome-ui", ns(request->GetURL().ToString()));
+      return true;
+    }
+    return false;
   }
   bool OnOpenURLFromTab(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>,
                         const CefString& url, WindowOpenDisposition disposition,
@@ -407,9 +425,24 @@ class SettingsClient final : public CefClient,
   IMPLEMENT_REFCOUNTING(SettingsClient);
 };
 
+// Extensions and Chrome toolbar actions may create browsers without an opener.
+// Track these too, so they are closed before CefShutdown releases the profile.
+CefRefPtr<CefClient> App::GetDefaultClient() { return new SettingsClient; }
+
 class SettingsViewDelegate final : public CefBrowserViewDelegate {
  public:
   cef_runtime_style_t GetBrowserRuntimeStyle() override { return CEF_RUNTIME_STYLE_CHROME; }
+  ChromeToolbarType GetChromeToolbarType(CefRefPtr<CefBrowserView>) override { return CEF_CTT_NORMAL; }
+  void OnWindowChanged(CefRefPtr<CefView> view, bool added) override {
+    if (!added) return;
+    auto browserView = view->AsBrowserView();
+    auto window = view->GetWindow();
+    auto toolbar = browserView ? browserView->GetChromeToolbar() : nullptr;
+    if (window && toolbar && !toolbar->GetParentView()) {
+      window->AddChildViewAt(toolbar, 0);
+      window->Layout();
+    }
+  }
  private:
   IMPLEMENT_REFCOUNTING(SettingsViewDelegate);
 };
@@ -420,7 +453,11 @@ class SettingsWindowDelegate final : public CefWindowDelegate {
   void OnWindowCreated(CefRefPtr<CefWindow> window) override {
     settingsWindow = window;
     window->SetTitle("Settings");
+    CefBoxLayoutSettings layoutSettings;
+    layoutSettings.horizontal = false;
+    auto layout = window->SetToBoxLayout(layoutSettings);
     window->AddChildView(view_);
+    layout->SetFlexForView(view_, 1);
     if (!testMode) window->Show();
   }
   void OnWindowClosing(CefRefPtr<CefWindow>) override { settingsClosing = true; }
@@ -442,14 +479,18 @@ class SettingsWindowDelegate final : public CefWindowDelegate {
 };
 
 bool isSettingsURL(const std::string& url) {
-  return url == "chrome://password-manager" || url.starts_with("chrome://password-manager/") ||
+  return url == "chrome://extensions" || url.starts_with("chrome://extensions/") ||
+    url.starts_with("chrome://extensions?") || url.starts_with("chrome://extensions#") ||
+    url == "https://chromewebstore.google.com" || url.starts_with("https://chromewebstore.google.com/") ||
+    url.starts_with("https://chromewebstore.google.com?") || url.starts_with("https://chromewebstore.google.com#") ||
+    url == "chrome://password-manager" || url.starts_with("chrome://password-manager/") ||
     url.starts_with("chrome://password-manager?") || url.starts_with("chrome://password-manager#") ||
     url == "chrome://settings" || url.starts_with("chrome://settings/") ||
     url.starts_with("chrome://settings?") || url.starts_with("chrome://settings#");
 }
 void openSettings(const std::string& requested) {
   const auto url = requested.empty() ? std::string("chrome://settings/") : requested;
-  if (!isSettingsURL(url)) throw std::runtime_error("Expected a Chromium settings or password-manager URL");
+  if (!isSettingsURL(url)) throw std::runtime_error("Expected a Chromium management or Chrome Web Store URL");
   if (settingsClosing) throw std::runtime_error("Settings window is closing; try again shortly");
   if (!settingsBrowser) {
     CefBrowserSettings settings;
@@ -463,7 +504,7 @@ void openSettings(const std::string& requested) {
       throw std::runtime_error("Could not create the Chrome settings window");
     }
   } else if (!requested.empty()) {
-    // An explicit subpage navigates.  M-x web-settings merely raises the
+    // An explicit subpage navigates.  M-x chromel-settings merely raises the
     // existing window, preserving a search, dialog or unfinished edit.
     settingsBrowser->GetMainFrame()->LoadURL(url);
   }
@@ -481,7 +522,7 @@ void closeSettings() {
 }
 
 // Read-only inspection and page-driven preference changes in disposable tests.
-// This observer is never installed outside WEB_CEF_TEST_MODE.
+// This observer is never installed outside CHROMEL_CEF_TEST_MODE.
 class SettingsTestObserver final : public CefDevToolsMessageObserver {
  public:
   void OnDevToolsMethodResult(CefRefPtr<CefBrowser>, int, bool success,
@@ -531,7 +572,7 @@ NSEvent* routeKeyEvent(NSEvent* event) {
     page->physicalCode = event.keyCode;
     if (event.isARepeat && page->scrollHeld) {
       auto frame = page->browser->GetFrameByIdentifier(page->scrollFrame);
-      if (frame && frame->IsValid()) frame->ExecuteJavaScript("window.__emacsWebScroller?.repeat();", "", 1);
+      if (frame && frame->IsValid()) frame->ExecuteJavaScript("window.__emacsChromelScroller?.repeat();", "", 1);
       return nil;
     }
   }
@@ -564,12 +605,12 @@ NSEvent* routeKeyEvent(NSEvent* event) {
 }
 }  // namespace
 
-namespace web {
+namespace chromel {
 void initialize(const std::string& bundle, const std::string& profile) {
   checkThread();
   std::filesystem::create_directories(profile + "/Default");
   const auto canonicalProfile = std::filesystem::canonical(profile).string();
-  testMode = getenv("WEB_CEF_TEST_MODE") && std::string(getenv("WEB_CEF_TEST_MODE")) == "1";
+  testMode = getenv("CHROMEL_CEF_TEST_MODE") && std::string(getenv("CHROMEL_CEF_TEST_MODE")) == "1";
   if (testMode) {
     auto temp = std::filesystem::canonical(utf8(NSTemporaryDirectory())).string() + "/";
     if (canonicalProfile.compare(0, temp.size(), temp) != 0)
@@ -582,7 +623,7 @@ void initialize(const std::string& bundle, const std::string& profile) {
   }
   if (!NSApp) throw std::runtime_error("A running Cocoa application is required");
   const auto framework = bundle + "/Contents/Frameworks/Chromium Embedded Framework.framework";
-  const auto helper = bundle + "/Contents/Frameworks/Web Helper.app/Contents/MacOS/Web Helper";
+  const auto helper = bundle + "/Contents/Frameworks/Chromel Helper.app/Contents/MacOS/Chromel Helper";
   if (![[NSFileManager defaultManager] isExecutableFileAtPath:ns(helper)])
     throw std::runtime_error("CEF helper missing; run scripts/build.sh");
   const auto mainBundle = std::filesystem::canonical(utf8(NSBundle.mainBundle.bundlePath)).string() + "/";
@@ -631,6 +672,7 @@ void initialize(const std::string& bundle, const std::string& profile) {
   }
   profilePath = canonicalProfile;
   initialized = true;
+  hostWakeup = std::make_unique<ChromelHostWakeup>();
 }
 
 long bind_window(const std::string& title) {
@@ -720,6 +762,11 @@ void command(int id, const std::string& action, const std::string& argument) {
     [view.window performClose:nil];
     return;
   }
+  if (id == 0 && action == "test-settings-show" && testMode) {
+    if (!settingsWindow) throw std::runtime_error("No management window");
+    settingsWindow->Show();
+    return;
+  }
   if (id == 0 && action == "test-settings-script" && testMode) {
     if (!settingsBrowser) throw std::runtime_error("No settings window");
     if (!settingsTestObserver) settingsTestObserver =
@@ -730,6 +777,7 @@ void command(int id, const std::string& action, const std::string& argument) {
     params->SetString("expression", argument);
     params->SetBool("returnByValue", true);
     params->SetBool("awaitPromise", true);
+    params->SetBool("userGesture", true);  // Simulate WebUI actions in disposable tests.
     settingsBrowser->GetHost()->ExecuteDevToolsMethod(0, "Runtime.evaluate", params);
     return;
   }
@@ -806,10 +854,10 @@ void command(int id, const std::string& action, const std::string& argument) {
     auto target = argument == "root" || !current ? browser->GetMainFrame() : current->GetParent();
     if (!target || !target->IsValid()) target = browser->GetMainFrame();
     if (current && current->IsValid())
-      current->ExecuteJavaScript("window.__emacsWebScroller?.reset();", "", 1);
+      current->ExecuteJavaScript("window.__emacsChromelScroller?.reset();", "", 1);
     if (target && target->IsValid()) {
       target->ExecuteJavaScript(
-        "(()=>{window.__emacsWebScroller?.reset();"
+        "(()=>{window.__emacsChromelScroller?.reset();"
         "let e=document.activeElement;while(e?.shadowRoot?.activeElement)e=e.shadowRoot.activeElement;"
         "window.focus();if(e?.matches('iframe,frame'))e.blur();})();", "", 1);
     }
@@ -850,7 +898,7 @@ void command(int id, const std::string& action, const std::string& argument) {
         ![request[@"script"] isKindOfClass:NSString.class])
       throw std::runtime_error("Invalid JavaScript request");
     page->pendingEval = utf8(request[@"token"]);
-    auto message = CefProcessMessage::Create("web.eval");
+    auto message = CefProcessMessage::Create("chromel.eval");
     message->GetArgumentList()->SetString(0, page->pendingEval);
     message->GetArgumentList()->SetString(1, utf8(request[@"script"]));
     browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, message);
@@ -967,6 +1015,7 @@ std::string inspect(int id) {
 void shutdown() {
   checkThread();
   if (!initialized || stopped) return;
+  hostWakeup.reset();
   // Copy: CloseBrowser may synchronously modify the live map.
   auto closing = browsers;
   for (const auto& item : closing) item.second->GetHost()->CloseBrowser(true);
@@ -983,8 +1032,8 @@ void shutdown() {
     pages.clear();
     CefShutdown();
   } else {
-    NSLog(@"Web: skipping CefShutdown because %zu browsers or a settings window did not close", browsers.size());
+    NSLog(@"Chromel: skipping CefShutdown because %zu browsers or a settings window did not close", browsers.size());
   }
   stopped = true;
 }
-}  // namespace web
+}  // namespace chromel

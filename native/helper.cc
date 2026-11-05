@@ -5,7 +5,7 @@
 #include "include/cef_process_message.h"
 #include "include/cef_v8.h"
 #include "include/cef_dom.h"
-#include "web_scripts.h"
+#include "chromel_scripts.h"
 
 namespace {
 // Only the browser process can request evaluation.  No native API is exposed
@@ -18,14 +18,14 @@ class RendererApp final : public CefApp, public CefRenderProcessHandler {
     if (!context->Enter()) return;
     CefRefPtr<CefV8Value> result;
     CefRefPtr<CefV8Exception> exception;
-    context->Eval(kWebScrollBootstrap, "", 1, result, exception);
+    context->Eval(kChromelScrollBootstrap, "", 1, result, exception);
     context->Exit();
   }
   void OnFocusedNodeChanged(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame,
                             CefRefPtr<CefDOMNode> node) override {
     if (!frame) return;
     const auto tag = node && node->IsElement() ? node->GetElementTagName().ToString() : "";
-    auto message = CefProcessMessage::Create("web.input-focus");
+    auto message = CefProcessMessage::Create("chromel.input-focus");
     message->GetArgumentList()->SetBool(0, node &&
       (node->IsEditable() || tag == "SELECT" || tag == "INPUT" || tag == "TEXTAREA" ||
        tag == "EMBED" || tag == "OBJECT"));
@@ -33,10 +33,10 @@ class RendererApp final : public CefApp, public CefRenderProcessHandler {
   }
   bool OnProcessMessageReceived(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame,
                                 CefProcessId source, CefRefPtr<CefProcessMessage> message) override {
-    if (source != PID_BROWSER || message->GetName() != "web.eval" || !frame->IsMain())
+    if (source != PID_BROWSER || message->GetName() != "chromel.eval" || !frame->IsMain())
       return false;
     auto input = message->GetArgumentList();
-    auto reply = CefProcessMessage::Create("web.eval.result");
+    auto reply = CefProcessMessage::Create("chromel.eval.result");
     auto output = reply->GetArgumentList();
     output->SetString(0, input->GetString(0));
     output->SetBool(1, false);

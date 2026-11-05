@@ -22,7 +22,7 @@ void observedRun(id self, SEL cmd) {
     for (int i = 0; i < count; ++i) {
       Dl_info info{};
       if (dladdr(frames[i], &info) && info.dli_sname &&
-          std::strcmp(info.dli_sname, "_ZN3web4pumpEv") == 0) {
+          std::strcmp(info.dli_sname, "_ZN7chromel4pumpEv") == 0) {
         ++nestedRuns;
         break;
       }
@@ -42,7 +42,7 @@ extern "C" int emacs_module_init(emacs_runtime* runtime) noexcept {
   if (!class_addMethod(appClass, @selector(run), (IMP)observedRun, method_getTypeEncoding(method)))
     method_setImplementation(method, (IMP)observedRun);
   emacs_env* env = runtime->get_environment(runtime);
-  emacs_value args[] = {env->intern(env, "web-test-pump-probe"),
+  emacs_value args[] = {env->intern(env, "chromel-test-pump-probe"),
     env->make_function(env, 1, 1, probe,
       "Arm with non-nil; disarm with nil. Return cumulative NSApp.run count while armed.", nullptr)};
   env->funcall(env, env->intern(env, "fset"), 2, args);

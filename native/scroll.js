@@ -5,7 +5,7 @@
   mode = mode || "pixels";
   // A zero-distance invocation installs tracking at document start in every
   // frame.  The first click must be remembered even before the first j/k.
-  if (!window.__emacsWebScroller) {
+  if (!window.__emacsChromelScroller) {
     const animations = new Map();
     let pending = 0, activated = null, instantHold = 0;
     const parent = element => element.assignedSlot || element.parentElement || element.getRootNode().host;
@@ -53,7 +53,7 @@
       const roots = new Set([document, activated?.getRootNode(), document.activeElement?.shadowRoot]);
       const layers = [...roots].filter(root => root?.querySelectorAll).flatMap(root =>
         [...root.querySelectorAll('dialog[open], :popover-open, [role="dialog"], [role="alertdialog"]')]
-      ).filter(element => !element.hasAttribute("data-emacs-web-hints") && exposed(element));
+      ).filter(element => !element.hasAttribute("data-emacs-chromel-hints") && exposed(element));
       return layers.reverse().find(element => element.matches(':modal, :popover-open')) ||
         layers[0] || document.documentElement;
     }
@@ -188,7 +188,7 @@
     window.addEventListener("pagehide", cancel);
     window.addEventListener("blur", cancel);
     document.addEventListener("visibilitychange", () => { if (document.hidden) cancel(); });
-    window.__emacsWebScroller = {
+    window.__emacsChromelScroller = {
       reset() { cancel(); activated = null; },
       cancel, release, scroll,
       repeat() { if (instantHold) scroll(instantHold, 0); },
@@ -201,5 +201,5 @@
       }
     };
   }
-  if (Number.isFinite(delta) && delta) window.__emacsWebScroller.scroll(delta, duration, mode);
+  if (Number.isFinite(delta) && delta) window.__emacsChromelScroller.scroll(delta, duration, mode);
 })

@@ -1,10 +1,16 @@
-# Web — Emacs 中的原生 CEF 浏览器
+# Chromel — Emacs 中的原生 CEF 浏览器
 
-macOS 实验性插件：一个网页对应一个 Emacs buffer，Chromium 视图作为 Emacs 窗口内的 `NSView` 显示。借鉴 Appine 的同进程原生视图方案，使用 CEF 替代 WebKit，不依赖 Qt，也不修改 Emacs 源码或 `Emacs.app`。
+原名 Web，现已统一使用 `chromel` 命令和 `chromel-` 符号前缀，避免与网页编辑插件的 `web-mode` 冲突。源码目录可以仍叫 `web`，以下路径沿用当前目录名。
 
-**这是浏览器插件的第一版，不是完整 Chrome。** 普通网页使用 Alloy 模式嵌入 Emacs，设置页使用独立的 Chrome-style 窗口。这一版有网页渲染、导航、独立 profile、Chromium 设置页、浏览历史和 DevTools；支持在 Chromium 密码管理页添加凭据并自动填充到内嵌网页；尚未验证首次登录后的保存提示，没有实现 Chrome Web Store 安装、Chrome 同步、书签管理或下载管理。
+从旧版升级：先完整退出使用旧模块的 Emacs，重新运行 `./scripts/build.sh`，将配置中的 `(require 'web)` 改为 `(require 'chromel)`，并将自定义变量、hook 和命令的 `web-` 前缀改为 `chromel-`。安装到现有 Emacs.app 的用户需重新运行安装器以更新 Helper；独立副本用户运行 `./scripts/launch.sh`。旧安装标记和备份可继续用于升级、恢复。不提供旧符号别名，以免重新引入命名冲突。
 
-本次更新接入 Chromium 密码管理入口，涉及原生模块和 Elisp。**更新构建后需要退出浏览器所在的 Emacs，再通过 `./scripts/launch.sh` 启动；仅重新加载 `web.el` 不足以更新。** 启动脚本会刷新项目内的独立副本，原来的 `Emacs.app` 不变。
+已有 `web/` 数据目录且尚无 `chromel/` 时会继续使用旧目录，保留 profile、历史和会话，不自动搬移数据。如果原来配置了自定义 `web-data-directory`，请把变量名改为 `chromel-data-directory`，目录值保持原样。
+
+macOS 实验性插件：一个网页对应一个 Emacs buffer，Chromium 视图作为 Emacs 窗口内的 `NSView` 显示。借鉴 Appine 的同进程原生视图方案，使用 CEF 替代 WebKit，不依赖 Qt，不需要修改或重新编译 Emacs 源码；可以安装到现有 `Emacs.app`，也可以使用独立应用副本。
+
+**这是浏览器插件的第一版，不是完整 Chrome。** 普通网页使用 Alloy 模式嵌入 Emacs，设置页使用独立的 Chrome-style 窗口。这一版有网页渲染、导航、独立 profile、Chromium 设置页、浏览历史和 DevTools；支持在 Chromium 密码管理页添加凭据并自动填充到内嵌网页；尚未验证首次登录后的保存提示，支持 Chrome Web Store 安装和原生扩展管理；没有实现 Chrome 同步、书签管理或下载管理。
+
+本次更新接入 Chrome Web Store 和扩展管理，涉及原生模块和 Elisp。**更新原生模块后需要完整重启浏览器所在的 Emacs；仅重新加载 `chromel.el` 不足以更新。** 安装到现有应用的用户在 CEF 或 Helper 更新后重新运行安装脚本；独立副本用户通过 `./scripts/launch.sh` 刷新宿主。
 
 `X` 恢复关闭页面、会话自动保存和延迟恢复仍可使用。
 键位已对齐 Vimium：`g` 刷新改为 `r`，`G` 改为滚动到底部，`b` 后退改为 `H`，`F` 改为后台打开链接。
@@ -20,7 +26,37 @@ cd ~/code/elisp/web
 
 首次构建下载 `cef.lock.json` 中固定版本的 CEF，按官方 SHA-1 校验后解包到 `.deps/`，产物放在 `build/`。网络中断可以重跑，已完整下载的分段会复用。建议预留 2 GB 可用空间。
 
-**必须通过项目提供的启动脚本运行浏览器所在的 Emacs：**
+### 安装到现有 Emacs.app
+
+先退出目标 Emacs，在系统终端执行：
+
+```sh
+cd ~/code/elisp/web
+python3 scripts/install-app.py /Applications/Emacs.app
+```
+
+安装后照常通过 Dock、Finder 或 `open -a Emacs` 启动，不再需要 `launch.sh`。在个人配置中加入本文后面的 `load-path` 和 `(require 'chromel)`。
+
+安装脚本会：
+
+- 检查应用、当前 CPU 架构、CEF/Helper/模块产物和目标运行状态；目标 Emacs 正在运行时拒绝替换。
+- 在同一文件系统准备副本，将 CEF framework 和五个 Helper 放入 `Contents/Frameworks/`，补齐缺失或空白的蓝牙用途声明，保留其他 Info.plist 配置（包括应用名称、bundle ID）和原签名的权限信息。
+- 先对 CEF framework 做本机 ad-hoc 签名，再签外层 Emacs，完成递归签名校验后才替换目标。
+- 将原应用完整保存在应用所在目录的 `.emacs-chromel-backups/` 下，输出具体路径；替换失败时恢复原应用。不修改个人配置或浏览器 profile。
+
+只读预检可在 Emacs 仍运行时执行：
+
+```sh
+python3 scripts/install-app.py /Applications/Emacs.app --dry-run
+```
+
+恢复时，先退出 Emacs，再用同一个命令加 `--restore`，后跟安装时输出的完整备份应用路径。恢复也会备份当前应用，并保留原备份。
+
+当前安装器支持未签名或 ad-hoc 签名的 Cocoa Emacs；不会把 Developer ID 签名或 hardened-runtime 应用直接降级。此类应用可继续使用独立副本方案。若 `/Applications/Emacs.app` 是 Homebrew 的软链接，脚本会显示并修改它实际指向的应用；Emacs 升级后需要重新安装。安装只复制已有构建产物，不会重新编译 Emacs 或 CEF。
+
+### 使用独立副本
+
+不想修改现有应用时，仍可使用项目启动脚本：
 
 ```sh
 ./scripts/launch.sh
@@ -28,9 +64,9 @@ cd ~/code/elisp/web
 ./scripts/launch.sh -Q
 ```
 
-脚本在 `build/EmacsWeb.app` 中生成一个独立副本：使用现有 Emacs 的原始二进制和资源，将 CEF framework 放入副本的 `Contents/Frameworks/`，并对副本做本机 ad-hoc 签名。原来的 `/Applications/Emacs.app` 不会被修改，也不需要重新编译 Emacs。正常启动会读取相同的个人配置；`-Q` 可启动干净实例。启动脚本自动加载 `web.el`。
+脚本在 `build/EmacsChromel.app` 中生成一个独立副本：使用现有 Emacs 的原始二进制和资源，将 CEF framework 放入副本的 `Contents/Frameworks/`，并对副本做本机 ad-hoc 签名。原来的 `/Applications/Emacs.app` 不会被修改，也不需要重新编译 Emacs。正常启动会读取相同的个人配置；`-Q` 可启动干净实例。启动脚本自动加载 `chromel.el`。
 
-这是 Chromium macOS 沙箱的约束：它按**实际主应用 bundle**授权 framework 读取，CEF 的 `main_bundle_path` 参数不能替代这个边界。在普通 Emacs 中加载 Elisp 没问题，但打开网页会给出启动脚本提示，不会关闭沙箱强行启动。不能仅把 framework 软链接到副本外面。
+这是 Chromium macOS 沙箱的约束：它按**实际主应用 bundle**授权 framework 读取，CEF 的 `main_bundle_path` 参数不能替代这个边界。安装器和独立副本方案都满足这一约束。没有嵌入 CEF 的普通 Emacs 仍无法打开网页，不会关闭沙箱强行启动。不能仅把 framework 软链接到副本外面。
 
 如果 Emacs 装在别处：
 
@@ -50,26 +86,26 @@ CEF_ROOT=/absolute/path/to/cef_binary_... ./scripts/build.sh
 EMACS_INCLUDE_DIR=/path/to/emacs/include ./scripts/build.sh
 ```
 
-如需从 `build/EmacsWeb.app` 自行启动，可以把下面配置加入 Emacs。使用启动脚本时不需要重复配置。构建完成后不需要每次启动都重新构建。
+安装到现有 Emacs.app 后，或从 `build/EmacsChromel.app` 自行启动时，把下面配置加入 Emacs。使用启动脚本时不需要重复配置。构建完成后不需要每次启动都重新构建。
 
 ```elisp
 (add-to-list 'load-path (expand-file-name "~/code/elisp/web"))
-(require 'web)
+(require 'chromel)
 
 ;; 可选；必须在首次打开网页之前设置。
-;; (setq web-data-directory (expand-file-name "web/" user-emacs-directory))
-;; (setq web-home-url "https://example.org")
+;; (setq chromel-data-directory (expand-file-name "chromel/" user-emacs-directory))
+;; (setq chromel-home-url "https://example.org")
 ```
 
-执行 `M-x web` 输入地址。也可调用 `(web "https://example.org")`。无协议域名默认使用 HTTPS，`localhost:端口` 默认 HTTP，包含空格的输入作为搜索词。
+执行 `M-x chromel` 输入地址。也可调用 `(chromel "https://example.org")`。无协议域名默认使用 HTTPS，`localhost:端口` 默认 HTTP，包含空格的输入作为搜索词。
 
 ## 在 Emacs 与网页间切换
 
-用 `M-x web` 新建网页后自动选中所在窗口并聚焦网页；`Esc` 或 `C-g` 返回 Emacs，按 `i` 或点击网页重新进入网页输入。通过提示点击按钮或链接后保留 Emacs 命令焦点，可以直接再次按 `f`；普通链接或弹窗产生的前台新 buffer 也会选中并保留命令焦点；`F` 和 `M-f` 打开的链接留在后台。选择输入框、编辑区或下拉框时才进入网页输入。网页聚焦时，`C-x`、`C-c`、`C-h` 和 `M-x` 会交回 Emacs；非输入控件中的 `j` / `k` 用于滚动，其他输入交给 Chromium。页面中的复制粘贴使用 macOS 的 `s-c` / `s-v`。浏览器 buffer 内的独立 `Esc` 键按 `C-g` 处理，用于取消或返回命令状态，不再传给网页触发退出全屏；其他 buffer 的按键保持不变。
+用 `M-x chromel` 新建网页后自动选中所在窗口并聚焦网页；`Esc` 或 `C-g` 返回 Emacs，按 `i` 或点击网页重新进入网页输入。通过提示点击按钮或链接后保留 Emacs 命令焦点，可以直接再次按 `f`；普通链接或弹窗产生的前台新 buffer 也会选中并保留命令焦点；`F` 和 `M-f` 打开的链接留在后台。选择输入框、编辑区或下拉框时才进入网页输入。网页聚焦时，`C-x`、`C-c`、`C-h` 和 `M-x` 会交回 Emacs；非输入控件中的 `j` / `k` 用于滚动，其他输入交给 Chromium。页面中的复制粘贴使用 macOS 的 `s-c` / `s-v`。浏览器 buffer 内的独立 `Esc` 键按 `C-g` 处理，用于取消或返回命令状态，不再传给网页触发退出全屏；其他 buffer 的按键保持不变。
 
 | 按键 / 命令 | 操作 |
 |---|---|
-| `M-x web` | 新建网页 buffer，并聚焦网页 |
+| `M-x chromel` | 新建网页 buffer，并聚焦网页 |
 | `o` / `O` | 输入地址或搜索词，在当前 / 新页面打开；可补全历史地址 |
 | `ge` / `gE` | 编辑当前地址，在当前 / 新页面打开 |
 | `r` / `C-c C-r` | 刷新 |
@@ -80,65 +116,67 @@ EMACS_INCLUDE_DIR=/path/to/emacs/include ./scripts/build.sh
 | `C-c C-p` / `C-u C-c C-p` | 返回上一层 / 最外层页面 |
 | `f` / `C-c C-j` | 显示交互元素标签，点击链接、按钮或聚焦输入框 |
 | `F` | 提示选择后在后台打开链接；其他控件仍在当前页操作 |
-| `C-u C-c C-j` / `M-x web-follow-new-buffer` | 提示选择后在前台打开链接 |
+| `C-u C-c C-j` / `M-x chromel-follow-new-buffer` | 提示选择后在前台打开链接 |
 | `p` / `P` | 把最新复制的文本作为地址或搜索词，在当前 / 新页面打开 |
-| `t` | 新建页面，打开 `web-home-url`，保留 Emacs 命令焦点 |
+| `t` | 新建页面，打开 `chromel-home-url`，保留 Emacs 命令焦点 |
 | `J` / `K` 或 `gT` / `gt` | 按标签顺序切换到上一个 / 下一个网页，首尾循环 |
 | `T` | 按标题或地址补全选择网页 buffer |
 | `^` | 返回最近访问的另一个网页 buffer |
 | `x` | 关闭当前网页，并切到下一个网页；最后一个关闭后返回普通 buffer |
 | `X` | 恢复最近关闭的网页，放回关闭时的标签位置并选中 |
-| `C-c w R` / `M-x web-restore-session` | 恢复上一次运行保存的会话 |
-| `C-c w S` / `M-x web-save-session` | 立即保存当前会话 |
+| `C-c w R` / `M-x chromel-restore-session` | 恢复上一次运行保存的会话 |
+| `C-c w S` / `M-x chromel-save-session` | 立即保存当前会话 |
 | `i` / `RET` / `C-c C-i` | 聚焦网页 |
 | `Esc` / `C-g` | 取消当前操作、从网页返回 Emacs 命令状态 |
-| `C-c w h` / `M-x web-history` | 搜索持久化浏览历史 |
+| `C-c w h` / `M-x chromel-history` | 搜索持久化浏览历史 |
 | `C-c C-o` | 编辑并打开当前页面地址，同 `ge` |
 | `C-c C-d` | 独立窗口打开 DevTools |
-| `M-x web-stop` | 停止加载 |
+| `M-x chromel-stop` | 停止加载 |
 | `q` | 隐藏当前网页窗口，保留 buffer |
 | `C-x k` | 用 Emacs 的 buffer 关闭命令关闭网页 |
-| `C-c w ,` / `M-x web-settings` | 打开或切回独立的 Chromium 设置窗口 |
-| `C-c w P` / `M-x web-passwords` | 打开 Chromium 密码管理页 |
-| `M-x web-diagnostics` | 查看 CEF 版本、profile 路径及浏览器数量 |
+| `C-c w ,` / `M-x chromel-settings` | 打开或切回独立的 Chromium 设置窗口 |
+| `C-c w P` / `M-x chromel-passwords` | 打开 Chromium 密码管理页 |
+| `C-c w e` / `M-x chromel-extensions` | 管理扩展：启停、权限、选项和卸载 |
+| `C-c w s` / `M-x chromel-extension-store` | 打开 Chrome Web Store 安装扩展 |
+| `M-x chromel-diagnostics` | 查看 CEF 版本、profile 路径及浏览器数量 |
 
 页面切换包含已加载网页和等待加载的会话标签；`gt` / `gT` 的顺序不随最近访问顺序改变。`t`、`O` 和切换页面命令在当前 Emacs 窗口显示目标页面并保留命令焦点。`o` / `O` 使用 Emacs minibuffer 和历史 URL 补全，尚未实现 Vimium 的书签混合搜索。`p` / `P` 与 Emacs 的 yank 一样，通过 `current-kill` 遵循个人剪贴板设置。
 
 不同网页可以并排显示。同一个 buffer 同时出现在多个分屏时，只有被选中的分屏显示原生网页；其余分屏显示提示文字。切换 buffer 会隐藏对应视图，切回时恢复。页面随所在 Emacs frame 移动，不使用外部置顶窗口跟随位置。
 
-`j` / `k` 在 Emacs 命令状态和网页聚焦时都可滚动，每次默认滚动 60 CSS 像素，可通过 `web-scroll-step` 调整。命令交给 CEF 当前聚焦的 frame，支持同域、跨域和多层嵌套 iframe：点击内页后直接按 `j` / `k`，无需先按 `C-g`。网页中的输入框、可编辑区域和下拉框保留正常字母输入；数字前缀在 Emacs 命令状态下使用。按 `C-c C-p`（`web-focus-parent-frame`）将焦点移到上一层页面；`C-u C-c C-p` 直接返回最外层。返回时取消原 frame 的滚动动画并保留 Emacs 命令焦点，不用再按 `C-g`。点击外页空白处也可切回外页。
+`j` / `k` 在 Emacs 命令状态和网页聚焦时都可滚动，每次默认滚动 60 CSS 像素，可通过 `chromel-scroll-step` 调整。命令交给 CEF 当前聚焦的 frame，支持同域、跨域和多层嵌套 iframe：点击内页后直接按 `j` / `k`，无需先按 `C-g`。网页中的输入框、可编辑区域和下拉框保留正常字母输入；数字前缀在 Emacs 命令状态下使用。按 `C-c C-p`（`chromel-focus-parent-frame`）将焦点移到上一层页面；`C-u C-c C-p` 直接返回最外层。返回时取消原 frame 的滚动动画并保留 Emacs 命令焦点，不用再按 `C-g`。点击外页空白处也可切回外页。
 
 在选中的 frame 内，从页面初始化时开始记录点击与焦点，优先滚动最近操作区域，到达边界后寻找该文档内的外层滚动区域。可见的原生 dialog、popover 和 ARIA 对话框优先限定滚动范围；外页被锁定时，会寻找弹层内可滚动的面板，并通过实际位移确认能否滚动。点击文字滚出可视区后仍保留其可见滚动容器。暂不跨 iframe 边界向父文档传递滚动。滚动保留原有的 Emacs 或网页键盘焦点。
 
-点按使用约 140 毫秒的平滑动画，由 `web-scroll-duration` 控制；分开的多次点按累计距离。长按使用同一个逐帧动画，短暂过渡后按 `web-scroll-speed` 持续移动，默认 900 CSS 像素/秒，不再依靠系统重复按键追加距离。长按松开即停；很短的点按仍会完成一次步长。反向按键取消旧方向的剩余距离；切换 buffer、窗口失去焦点、滚轮、触摸或点击会停止滚动。
+点按使用约 140 毫秒的平滑动画，由 `chromel-scroll-duration` 控制；分开的多次点按累计距离。长按使用同一个逐帧动画，短暂过渡后按 `chromel-scroll-speed` 持续移动，默认 900 CSS 像素/秒，不再依靠系统重复按键追加距离。长按松开即停；很短的点按仍会完成一次步长。反向按键取消旧方向的剩余距离；切换 buffer、窗口失去焦点、滚轮、触摸或点击会停止滚动。
 
 可以分别调整点按距离和长按速度：
 
 ```elisp
-(setq web-scroll-step 60
-      web-scroll-speed 900
-      web-scroll-duration 140)
+(setq chromel-scroll-step 60
+      chromel-scroll-speed 900
+      chromel-scroll-duration 140)
 ```
 
-`web-scroll-duration` 设为 `0` 或启用系统“减少动态效果”时，使用按键重复驱动的即时滚动。Emacs 中的数字前缀、程序调用和没有对应物理按键的键盘宏继续按指定距离滚动。Meow 先决定按键绑定；只有 `j` / `k` 实际触发滚动命令后，原生层才接管这一次长按的重复事件和松键。
+`chromel-scroll-duration` 设为 `0` 或启用系统“减少动态效果”时，使用按键重复驱动的即时滚动。Emacs 中的数字前缀、程序调用和没有对应物理按键的键盘宏继续按指定距离滚动。Meow 先决定按键绑定；只有 `j` / `k` 实际触发滚动命令后，原生层才接管这一次长按的重复事件和松键。
 
-Meow 用户：`web-mode` 默认使用 **motion** 状态，浏览器键位定义在 `web-mode-map` 中，`SPC` 继续进入 Meow keypad。只将 `meow-next` / `meow-prev` 局部重映射为网页滚动，以适配常见的 motion `j` / `k` 配置；不修改 Meow 的共享键位或其他 buffer。支持先加载 Meow 或先加载 web；若你在 `meow-mode-state-list` 明确设置了 `web-mode` 的状态，会保留该设置。个人额外定义的 motion 按键仍优先于 major mode。
+Meow 用户：`chromel-mode` 默认使用 **motion** 状态，浏览器键位定义在 `chromel-mode-map` 中，`SPC` 继续进入 Meow keypad。只将 `meow-next` / `meow-prev` 局部重映射为网页滚动，以适配常见的 motion `j` / `k` 配置；不修改 Meow 的共享键位或其他 buffer。支持先加载 Meow 或先加载 chromel；若你在 `meow-mode-state-list` 明确设置了 `chromel-mode` 的状态，会保留该设置。个人额外定义的 motion 按键仍优先于 major mode。
 
 ## Chromium 设置
 
-执行 `M-x web-settings`，或在网页 buffer 中按 `C-c w ,`，打开真实的 `chrome://settings/` 页面。用 `o` / `O` 输入该地址也会打开设置窗口；支持 `chrome://settings/fonts`、`chrome://settings/languages` 等子页面。普通网页仍嵌入 Emacs。
+执行 `M-x chromel-settings`，或在网页 buffer 中按 `C-c w ,`，打开真实的 `chrome://settings/` 页面。用 `o` / `O` 输入该地址也会打开设置窗口；支持 `chrome://settings/fonts`、`chrome://settings/languages` 等子页面。普通网页仍嵌入 Emacs。
 
-设置使用 CEF `CefWindow` / `CefBrowserView` 管理的独立 Chrome-style 原生窗口，与嵌入网页共享本插件的 CEF request context 和 profile，不使用你日常 Google Chrome 的个人资料。重复执行 `web-settings` 会切回已有窗口并保留当前子页面；显式输入设置地址则导航到指定页面。设置窗口不计入 Emacs 标签、浏览历史或会话恢复；可以独立关闭，退出 Emacs 时也会关闭并保存配置。
+设置使用 CEF `CefWindow` / `CefBrowserView` 管理的独立 Chrome-style 原生窗口，与嵌入网页共享本插件的 CEF request context 和 profile，不使用你日常 Google Chrome 的个人资料。重复执行 `chromel-settings` 会切回已有窗口并保留当前子页面；显式输入设置地址则导航到指定页面。设置窗口不计入 Emacs 标签、浏览历史或会话恢复；可以独立关闭，退出 Emacs 时也会关闭并保存配置。
 
 已通过实际设置页面的 API 验证：更改默认字号会立即影响使用默认字号的嵌入网页，退出并重启后继续生效。网站自行指定字号时可能看不到变化。设置窗口使用 Chromium 自己的鼠标和快捷键，不使用网页 buffer 的 Vimium / Meow 键位。
 
-设置页面中的项目不代表所有 Chrome 产品功能都已接入。Google 账号同步、首次登录后的密码保存提示、扩展安装等仍需分别实现和验证。Chromium 的启动页、搜索引擎等选项也不会替代 Elisp 的 `web-home-url`、Emacs 搜索入口和会话管理。
+设置页面中的项目不代表所有 Chrome 产品功能都已接入。Google 账号同步、首次登录后的密码保存提示等仍需分别实现和验证。Chromium 的启动页、搜索引擎等选项也不会替代 Elisp 的 `chromel-home-url`、Emacs 搜索入口和会话管理。
 
-更新原生模块后需要退出承载浏览器的 Emacs，再通过 `./scripts/launch.sh` 启动；仅重新加载 `web.el` 不够。
+更新原生模块后需要完整重启 Emacs；使用独立副本时通过 `./scripts/launch.sh` 启动。仅重新加载 `chromel.el` 不够。
 
 ## 密码管理与自动填充
 
-执行 `M-x web-passwords`，或在网页 buffer 中按 `C-c w P`，打开真实的 `chrome://password-manager/`。也可以通过 `o` / `O` 输入该地址。它与设置页复用同一个独立窗口，与内嵌网页共享本插件的 profile，不读取日常 Google Chrome 的密码库。
+执行 `M-x chromel-passwords`，或在网页 buffer 中按 `C-c w P`，打开真实的 `chrome://password-manager/`。也可以通过 `o` / `O` 输入该地址。它与设置页复用同一个独立窗口，与内嵌网页共享本插件的 profile，不读取日常 Google Chrome 的密码库。
 
 1. 在密码管理页点击添加密码，填写网站、用户名和密码。
 2. 返回 Emacs，打开或重新加载该网站的登录页。
@@ -147,6 +185,21 @@ Meow 用户：`web-mode` 默认使用 **motion** 状态，浏览器键位定义�
 已在 CEF 156 的真实内嵌 Alloy 页面上验证：原生密码库保存、账号/密码自动填充、可信点击后填充值可用、关闭管理窗口后填充、重启 Emacs 后继续填充，以及另一个主机名不误填。凭据由 Chromium 管理，不写入 Elisp 历史或会话文件，也不由插件脚本向网页注入密码。
 
 当前验证的是“在管理页手动添加 → 网页自动填充”。首次网站登录后是否显示保存/更新密码提示、多个账号的选择弹层、复杂网站表单及 Google 账号同步尚未验证。自动化测试使用临时 profile、虚构账号和 mock keychain；日常运行使用系统钥匙串，系统授权和真实站点仍需人工验收。
+
+## 扩展管理与 Chrome Web Store
+
+1. 执行 `M-x chromel-extension-store`（网页 buffer 中为 `C-c w s`）。
+2. 在官方商店找到扩展，点击 **Add to Chrome**，阅读 Chromium 原生权限提示后确认安装。商店可能显示“Switch to Chrome”的推广提示；本机实测不妨碍安装。
+3. 返回 Emacs，重新加载需要使用扩展的页面。
+4. 执行 `M-x chromel-extensions`（`C-c w e`）管理已安装扩展：启用/禁用、网站权限、扩展选项、快捷键和卸载。
+
+`chrome://extensions/`、其子页面及 `https://chromewebstore.google.com/` 都自动进入共享的 Chrome-style 管理窗口。从内嵌网页导航到商店也会转交，并保留原 buffer。管理窗口现在包含 Chromium 原生工具栏，可后退、查看地址和访问扩展菜单。它与设置/密码管理页复用窗口和 profile，不使用日常 Google Chrome 的扩展目录。
+
+安装、权限确认、CRX 校验及扩展更新由 Chromium 的原生机制负责；插件不自行解包 CRX 或静默授予权限。扩展和状态保存在 `chromel-data-directory` 对应的 Chromium profile 中。安装时可能出现扩展自己的欢迎页或其他 Chrome 窗口；这些窗口纳入退出时的关闭管理，避免在仍有浏览器存活时销毁 CEF。
+
+已用商店中的 JSON Formatter（`bcjindcccaagfpapjjmafapmmgkkhgoa`）在隔离 profile 验证官方商店下载、原生确认、正常安装记录、内嵌 Alloy 页面的内容脚本、关闭管理窗口后生效、重启保留、禁用/重新启用和卸载。联网集成测试不使用用户的日常 profile。
+
+**安装成功不代表所有扩展功能都兼容。** 工具栏弹窗作用于独立 Chrome 窗口，不会自动获得当前 Emacs buffer 的标签上下文；依赖 `activeTab`、Chrome 标签栏、侧栏、Google 登录或桌面应用通信的扩展仍需单独适配。1Password 的桌面联动尚未实现。CEF 官方关于 [Alloy 与扩展界面的说明](https://github.com/chromiumembedded/cef/issues/3859)也区分了共享 request context 的能力与 Chrome UI 能力。
 
 ## 用键盘操作链接和控件
 
@@ -157,7 +210,7 @@ Meow 用户：`web-mode` 默认使用 **motion** 状态，浏览器键位定义�
 - 下拉框：聚焦后用空格、方向键和回车操作。
 - `F`：普通链接按新标签方式在后台 buffer 打开，当前页面保持选中；按钮和表单仍在当前页操作。需要前台打开时使用 `C-u C-c C-j`。
 
-标签默认使用 `asdfghjklqwertyuiopzxcvbnm`；可通过 `web-hint-alphabet` 自定义至少两个不重复的小写字母。若滚动或尺寸变化使标签位置失效，会清除提示，需要重新调用命令。
+标签默认使用 `asdfghjklqwertyuiopzxcvbnm`；可通过 `chromel-hint-alphabet` 自定义至少两个不重复的小写字母。若滚动或尺寸变化使标签位置失效，会清除提示，需要重新调用命令。
 
 支持主文档和开放 shadow DOM 中的标准控件、关联隐藏表单控件的 label、常用 ARIA 交互角色，以及带 `onclick`、可键盘聚焦或显示手形光标的自定义控件。隐藏、被遮挡、禁用、inert 和屏幕外的元素会跳过，最多标注 1000 个。选择后会重新检查元素位置与可用状态，模态对话框内也能显示标签。
 
@@ -173,14 +226,14 @@ Meow 用户：`web-mode` 默认使用 **motion** 状态，浏览器键位定义�
 
 | 操作 | 简短按键 | 通用入口 / 命令 |
 |---|---|---|
-| 页内搜索 | `/` | `C-c w s` / `web-find` |
+| 页内搜索 | `/` | `C-c w s` / `chromel-find` |
 | 下一个 / 上一个匹配 | `n` / `N` | `C-c w n` / `C-c w p` |
-| 清除搜索高亮 | — | `C-c w c` / `web-find-clear` |
+| 清除搜索高亮 | — | `C-c w c` / `chromel-find-clear` |
 | 向下 / 向上半页 | `d` / `u` | `C-c w d` / `C-c w u` |
 | 滚动区域顶部 / 底部 | `gg` / `G`（也保留 `M-<` / `M->`） | `C-c w <` / `C-c w >` |
-| 复制当前地址 | `yy` | `C-c w y` / `web-copy-url` |
-| 用提示标签复制链接 | `yf` | `C-c w f` / `web-copy-link` |
-| 连续在后台打开链接 | `M-f` | `C-c w m` / `web-follow-multiple` |
+| 复制当前地址 | `yy` | `C-c w y` / `chromel-copy-url` |
+| 用提示标签复制链接 | `yf` | `C-c w f` / `chromel-copy-link` |
+| 连续在后台打开链接 | `M-f` | `C-c w m` / `chromel-follow-multiple` |
 
 搜索在 minibuffer 输入文字，按回车后定位并高亮，mode line 显示当前匹配序号和总数。搜索使用 Chromium 原生接口，支持跨域 iframe 内的可搜索文本；当前为不区分大小写的字面文本搜索，不提供正则表达式。`n` / `N` 循环查找，查询和匹配状态按 buffer 保存。在输入查询时按 `Esc` / `C-g` 会取消并清除高亮；已经完成搜索后用 `C-c w c` 清除。清除后仍可用 `n` / `N` 再次搜索上次文字。
 
@@ -194,9 +247,9 @@ Meow 用户：`web-mode` 默认使用 **motion** 状态，浏览器键位定义�
 
 ## 找回关闭的页面和恢复会话
 
-按 `X` 恢复最近关闭的网页，连续按可逐个找回。用 `x`、`C-x k` 或切换 major mode 关闭的网页都会记录，默认保留最近 30 个。恢复会尽量插入关闭时的位置并保留 Emacs 命令焦点。最后一个网页关闭后，在其他 buffer 执行 `M-x web-reopen-closed-tab` 即可。恢复失败时保留原记录，可以重试。
+按 `X` 恢复最近关闭的网页，连续按可逐个找回。用 `x`、`C-x k` 或切换 major mode 关闭的网页都会记录，默认保留最近 30 个。恢复会尽量插入关闭时的位置并保留 Emacs 命令焦点。最后一个网页关闭后，在其他 buffer 执行 `M-x chromel-reopen-closed-tab` 即可。恢复失败时保留原记录，可以重试。
 
-打开、关闭、导航、标题或选中项变化后，会话会在约 1 秒内自动保存；正常退出时再保存一次，然后等待原生浏览器完成关闭。重启后执行 `M-x web-restore-session`，或在网页中按 `C-c w R`：
+打开、关闭、导航、标题或选中项变化后，会话会在约 1 秒内自动保存；正常退出时再保存一次，然后等待原生浏览器完成关闭。重启后执行 `M-x chromel-restore-session`，或在网页中按 `C-c w R`：
 
 - 恢复保存的地址、标题、标签顺序和选中项；关闭记录也会保留，重启后仍可用 `X`。
 - 最初只为保存的选中页面创建 CEF 浏览器。其他标签可以在 `T` 或普通 Emacs buffer 列表中找到，首次选中时才加载；`J/K`、`gt/gT` 和普通 buffer 切换都支持。
@@ -208,18 +261,18 @@ Meow 用户：`web-mode` 默认使用 **motion** 状态，浏览器键位定义�
 
 ```elisp
 ;; 可选：调整关闭记录数，或关闭自动会话保存。
-(setq web-closed-tab-limit 30)
-;; (setq web-session-auto-save nil)
+(setq chromel-closed-tab-limit 30)
+;; (setq chromel-session-auto-save nil)
 ```
 
 `C-c w S` 可随时立即保存。自动保存关闭时，该命令仍可手动保存。
 
 ## 数据和能力边界
 
-默认数据在 `~/.emacs.d/web/`（实际相对 `user-emacs-directory`）：
+默认数据在 `~/.emacs.d/chromel/`（实际相对 `user-emacs-directory`）：
 
 ```text
-web/
+chromel/
 ├── history.json          # 插件维护的历史；默认最多 1000 个不同 URL
 ├── session.json          # 当前会话：标签、选中项和关闭记录
 ├── session.previous.json # 本次运行首次保存前的上一份会话备份
@@ -228,13 +281,13 @@ web/
     └── Default/          # CEF Cookie、站点存储与缓存
 ```
 
-这个 profile 独立于系统 Chrome。修改 `web-data-directory` 后需要重启 Emacs；不要指向现有 Chrome profile，也不要让两个 Emacs 实例同时使用同一个 profile。CEF 初始化后不能在同一进程中卸载、重新初始化；更新 `.dylib` 后也需要重启 Emacs。首次使用系统钥匙串加密时，macOS 可能显示授权对话框。
+这个 profile 独立于系统 Chrome。修改 `chromel-data-directory` 后需要重启 Emacs；不要指向现有 Chrome profile，也不要让两个 Emacs 实例同时使用同一个 profile。CEF 初始化后不能在同一进程中卸载、重新初始化；更新 `.dylib` 后也需要重启 Emacs。首次使用系统钥匙串加密时，macOS 可能显示授权对话框。
 
 - Cookie 和站点存储使用磁盘 profile；网站仍可按自身规则让登录失效。
 - 历史由 Elisp 从成功加载事件记录，使用 JSON 和原子替换保存，不依赖 `chrome://history`。
 - 点击打开新窗口的链接会转成新 Emacs buffer。第一版不保留 `window.opener` 关系，依赖脚本弹窗通信的登录流程可能不兼容。
 - 页面关闭会强制完成，暂不提供 `beforeunload` 的“未保存内容”确认。
-- 已验证手动添加凭据后的原生密码自动填充；扩展商店和下载管理尚未实现。Chromium 设置页已接入，但权限提示和其他浏览器功能仍需逐项验证。不能用 CEF 的网页兼容性推断这些 Chrome 产品功能可用。
+- 已验证手动添加凭据后的原生密码自动填充；已接入扩展商店与原生管理，下载管理尚未实现。Chromium 设置页已接入，但权限提示和其他浏览器功能仍需逐项验证。不能用 CEF 的网页兼容性推断这些 Chrome 产品功能可用。
 - CEF helper 保持 Chromium 沙箱开启，没有添加 `--no-sandbox` 或绕过证书校验的参数。
 - 目前支持 NS/Cocoa Emacs，不支持终端 Emacs、Linux、GNUstep 或 emacs-mac port。
 
@@ -242,7 +295,7 @@ web/
 
 本机已通过（2026-10-29，Apple Silicon / Emacs 32.0.50 / 锁定的 CEF 156）：
 
-- 35 项 ERT 测试及无警告 Elisp 字节编译，包括中文历史记录、标签输入、取消清理、控件激活、过期回复、页面创建顺序/MRU 切换、关闭取消和剪贴板入口。
+- 36 项 ERT 测试及无警告 Elisp 字节编译，包括中文历史记录、标签输入、取消清理、控件激活、过期回复、页面创建顺序/MRU 切换、关闭取消和剪贴板入口。
 - 会话测试覆盖关闭位置、取消关闭、延迟创建、失败重试、中文编码、原子写失败、损坏文件保护、退出保存和上一份备份。
 - 两个独立 GUI 进程验证会话恢复：3 个标签最初只创建 1 个 CEF 浏览器，普通 buffer 切换才加载下一页，并验证 `X` 和共享 profile。
 - 2 项真实 Meow 集成测试，覆盖两种加载顺序：motion 默认状态、Vimium 键位、局部 j/k、SPC keypad 和其他 buffer 不受影响。
@@ -261,25 +314,40 @@ web/
 - 半页/首尾滚动：页面、固定面板、跨域 iframe 和原生弹层；区域边界不误跳外页。
 - 链接复制和连续打开：过滤按钮/隐藏链接、编码地址、复制不点击、真实点击处理、阻止跳转、后台隐藏/焦点保留、取消清理。
 - Vimium 键位 GUI 回归：实际按键序列驱动 `gg/G`、`F` 后台打开、`t/J/K/gt/gT/T/^/x`，检查 Emacs 命令焦点与原生视图关闭。
-- 消息循环回归：测试探针检查原生 `web::pump` 调用栈内是否重新进入 `NSApp.run`，覆盖持续绘制及 60 步页面创建、切换、隐藏和关闭；探针只加载到隔离测试进程。
+- 消息循环回归：测试探针检查原生 `chromel::pump` 调用栈内是否重新进入 `NSApp.run`，覆盖持续绘制及 60 步页面创建、切换、隐藏和关闭；探针只加载到隔离测试进程。
 
+- 扩展回归：商店原生确认和安装、跨进程保留、内嵌网页实际效果、管理窗口关闭、禁用/启用/卸载；商店链接转交、来源 buffer 保留、管理子页面复用和扩展创建窗口的退出生命周期。
 - 密码回归：原生密码管理 API 添加虚构账号、内嵌 Alloy 表单自动填充、可信点击、关闭管理窗口、跨主机名不误填、两个独立 Emacs 进程间持久化。
 - 设置窗口回归：真实 WebUI 加载、Chrome runtime、共享 request context、窗口复用、独立关闭/重开、字号设置影响嵌入网页、跨进程持久化及退出时关闭设置窗口。
 
 尚未完成人工验收：中文输入法、真实键盘快捷键组合、多显示器不同缩放比、Spaces/全屏切换、复杂站点弹窗登录。几何与生命周期测试通过不代表这些场景已经验证。
 
+扩展的联网集成测试单独运行，会显示测试窗口，在临时 profile 安装 JSON Formatter，并在测试结束后清理。测试探针只编译/加载到测试进程，不打包进浏览器模块：
+
+```sh
+python3 scripts/test-extensions.py
+# 使用已有测试宿主，避免重新准备 app：
+python3 scripts/test-extensions.py --host /path/to/EmacsChromel.app
+```
+
+安装器的失败回滚、备份保护、运行进程检查及签名限制测试：
+
+```sh
+python3 test/install-app-test.py
+```
+
 Elisp 测试不需要启动 CEF：
 
 ```sh
-emacs -Q --batch -L . -l test/web-test.el -l test/web-session-test.el -f ert-run-tests-batch-and-exit
+emacs -Q --batch -L . -l test/chromel-test.el -l test/chromel-session-test.el -f ert-run-tests-batch-and-exit
 ```
 
 可选的 Meow 测试需要把 Meow 安装目录加入 load-path：
 
 ```sh
-emacs -Q --batch -L . -L ~/.emacs.d/elpa/meow -l test/web-meow-test.el -f ert-run-tests-batch-and-exit
+emacs -Q --batch -L . -L ~/.emacs.d/elpa/meow -l test/chromel-meow-test.el -f ert-run-tests-batch-and-exit
 # 反向加载顺序：
-emacs -Q --batch -L . -L ~/.emacs.d/elpa/meow -l web -l test/web-meow-test.el -f ert-run-tests-batch-and-exit
+emacs -Q --batch -L . -L ~/.emacs.d/elpa/meow -l chromel -l test/chromel-meow-test.el -f ert-run-tests-batch-and-exit
 ```
 
 独立 GUI 集成测试先构建测试专用的消息循环探针，再启动 `-Q` Emacs，使用自动清理的临时 profile，不加载你的个人配置：
@@ -294,21 +362,23 @@ EMACS_APP=/path/to/Emacs.app python3 scripts/test-gui.py
 
 ```sh
 TEST_PROFILE="$(mktemp -d)"
-build/WebRuntime.app/Contents/MacOS/WebRuntime --smoke-test "$TEST_PROFILE"
+build/ChromelRuntime.app/Contents/MacOS/ChromelRuntime --smoke-test "$TEST_PROFILE"
 ```
 
-该命令使用专用临时目录，测试后可删除。`WebRuntime.app` 本身不是日常浏览器入口。自动化测试只对临时 profile 设置 `WEB_CEF_TEST_MODE=1`，使用 Chromium 的 mock keychain；日常运行不使用它。测试验证站点及密码持久化和本地表单自动填充，不验证系统钥匙串授权、真实网站登录或首次登录保存提示。
+该命令使用专用临时目录，测试后可删除。`ChromelRuntime.app` 本身不是日常浏览器入口。自动化测试只对临时 profile 设置 `CHROMEL_CEF_TEST_MODE=1`，使用 Chromium 的 mock keychain；日常运行不使用它。测试验证站点及密码持久化和本地表单自动填充，不验证系统钥匙串授权、真实网站登录或首次登录保存提示。
 
-如果遇到 `Invalid or prematurely-freed autorelease pool` 并伴随 `abort trap`，需检查 macOS 崩溃报告。本项目在 2026-10-29 捕获到的调用链是 `web::pump → CEF → EmacsApp run → NSApplication run → NSAutoreleasePool drain`。旧模块的隔离测试也确认 CEF pump 会重新进入 `NSApp.run`。修复使用 CEF external message pump，并提供 browser process handler，避免 CEF 回退到默认 Cocoa 消息循环。`M-x web-diagnostics` 应显示 `Message pump: external (Emacs timer)`。这针对已定位的循环重入路径，不代表所有 GPU 或 frame 超时问题都已解决；这些日志需要结合显示异常和独立堆栈分析。
+如果遇到 `Invalid or prematurely-freed autorelease pool` 并伴随 `abort trap`，需检查 macOS 崩溃报告。本项目在 2026-10-29 捕获到的调用链是 `chromel::pump → CEF → EmacsApp run → NSApplication run → NSAutoreleasePool drain`。旧模块的隔离测试也确认 CEF pump 会重新进入 `NSApp.run`。修复使用 CEF external message pump，并提供 browser process handler，避免 CEF 回退到默认 Cocoa 消息循环。`M-x chromel-diagnostics` 应显示 `Message pump: external (Emacs timer)`。这针对已定位的循环重入路径，不代表所有 GPU 或 frame 超时问题都已解决；这些日志需要结合显示异常和独立堆栈分析。
 
-如果网页不显示，先看 `M-x web-diagnostics` 和 `profile/cef.log`。若 minibuffer 提示 `Web paused`，修复日志中的原因后执行 `M-x web-resume`。请在独立测试实例中尝试新的原生代码：浏览器 UI 和 Emacs 共享进程，原生模块崩溃仍可能导致整个 Emacs 退出。
+如果网页不显示，先看 `M-x chromel-diagnostics` 和 `profile/cef.log`。若 minibuffer 提示 `Chromel paused`，修复日志中的原因后执行 `M-x chromel-resume`。请在独立测试实例中尝试新的原生代码：浏览器 UI 和 Emacs 共享进程，原生模块崩溃仍可能导致整个 Emacs 退出。
+
+如果 Google 等网站登录时整个 Emacs 退出，且 macOS 崩溃报告的终止原因是 `TCC` / 缺少 `NSBluetoothAlwaysUsageDescription`，退出 Emacs 后重新运行安装脚本；独立副本用户重新运行 `./scripts/launch.sh`。脚本会在宿主应用中补齐蓝牙用途声明并重新签名，已有独立副本也会刷新。通行密钥登录可能通过蓝牙发现附近的手机或安全密钥；此声明用于系统授权提示，不会自动授予蓝牙权限，也不解决 Touch ID 的签名 entitlement 要求。无需为此重新编译原生模块。
 
 ## 实现结构
 
 ```text
-web.el                    buffer、布局、按键、历史、事件轮询
+chromel.el                    buffer、布局、按键、历史、事件轮询
 native/module.mm          Emacs 动态模块 API，参数检查与错误转换
-native/web_core.mm        CEF、Cocoa 子视图、焦点和浏览器生命周期
+native/chromel_core.mm        CEF、Cocoa 子视图、焦点和浏览器生命周期
 native/helper.cc          CEF 子进程入口、沙箱、每个 frame 的初始化与输入焦点报告
 native/scripts.h.in       将同一份滚动脚本编入 Helper
 native/hints.js           可交互元素筛选、标签、前缀过滤与激活位置校验
@@ -336,3 +406,18 @@ CEF 回调只写事件队列，由 Elisp 定时读取，回调中不重入 Lisp�
 参考：[Appine](../appine)、[CEF 项目](https://github.com/chromiumembedded/cef)、[CEF macOS window info](https://github.com/chromiumembedded/cef/blob/master/include/internal/cef_types_mac.h)、[CEF 生命周期约定](https://github.com/chromiumembedded/cef/blob/master/include/cef_life_span_handler.h)。本项目按上述接口重新实现；CEF 的许可证及第三方声明保留在下载的分发包中。
 
 本项目代码采用 GPL-3.0-or-later，见 [LICENSE](LICENSE)。CEF 及 Chromium 组件遵循各自许可证。
+
+### 原生扩展窗口关闭后的事件唤醒
+
+Emacs 的短时 Cocoa 事件循环依赖 application-defined 事件返回 Lisp。Chromium 原生窗口的鼠标跟踪/关闭路径可能丢弃等待中的事件，表现为 Emacs 停在 `NSApplication run`，连 Lisp 定时器和 emacsclient 都不再响应。插件在外部窗口输入处理完成及关闭后，通过一次性的 Cocoa 定时器补发指向存活 Emacs frame 的唤醒事件；不在原生回调里重新进入 Lisp 或 CEF。
+
+无可见窗口的 Cocoa 回归测试（不加载 CEF、不读取个人 profile）：
+
+```sh
+cmake --build build --target chromel-host-wakeup-test
+./build/chromel-host-wakeup-test
+./build/chromel-host-wakeup-test --input-only
+./build/chromel-host-wakeup-test --cancel
+```
+
+测试覆盖丢失原唤醒后的恢复、多个关闭通知合并、原生输入返回后的恢复。真实 ZeroOmega 鼠标关闭路径已复现卡住；修复后的完整 GUI 复测尚未完成。更新原生模块后需要重启 Emacs，无需重新运行应用安装器。

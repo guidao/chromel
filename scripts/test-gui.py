@@ -12,7 +12,7 @@ import threading
 root = pathlib.Path(__file__).resolve().parent.parent
 # Test-only observer for NSApp.run reentry, never loaded by the browser itself.
 subprocess.run(["cmake", "-S", str(root), "-B", str(root / "build")], check=True)
-subprocess.run(["cmake", "--build", str(root / "build"), "--target", "web-pump-probe"], check=True)
+subprocess.run(["cmake", "--build", str(root / "build"), "--target", "chromel-pump-probe"], check=True)
 host = subprocess.check_output(["python3", str(root / "scripts/prepare-host.py")], text=True).strip()
 emacs = str(pathlib.Path(host) / "Contents/MacOS/Emacs")
 
@@ -34,11 +34,11 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         <script>
         document.getElementById('shadow-host').attachShadow({mode:'open'}).innerHTML =
             '<a href="/shadow">Shadow link</a>';
-        const restored = localStorage.getItem('web-test') === 'saved'
-                         && document.cookie.includes('web-test=saved');
-        localStorage.setItem('web-test', 'saved');
-        document.cookie = 'web-test=saved; Max-Age=3600; Path=/; SameSite=Lax';
-        document.title = restored ? 'web-emacs-restored' : 'web-emacs-ready';
+        const restored = localStorage.getItem('chromel-test') === 'saved'
+                         && document.cookie.includes('chromel-test=saved');
+        localStorage.setItem('chromel-test', 'saved');
+        document.cookie = 'chromel-test=saved; Max-Age=3600; Path=/; SameSite=Lax';
+        document.title = restored ? 'chromel-emacs-restored' : 'chromel-emacs-ready';
         </script>"""
         if self.path == '/hint-target':
             body = b"<!doctype html><meta charset=utf-8><title>hint-target</title><h1>Link followed</h1>"
@@ -78,40 +78,41 @@ server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 url = f"http://127.0.0.1:{server.server_port}/fixture"
 try:
-    with tempfile.TemporaryDirectory(prefix="emacs-web-smoke-") as temp:
-        for expected, script in [("web-emacs-ready", "gui-smoke.el"),
-                                 ("web-emacs-restored", "gui-smoke.el"),
-                                 ("web-emacs-restored", "gui-hints.el"),
+    with tempfile.TemporaryDirectory(prefix="emacs-chromel-smoke-") as temp:
+        for expected, script in [("chromel-emacs-ready", "gui-smoke.el"),
+                                 ("chromel-emacs-restored", "gui-smoke.el"),
+                                 ("chromel-emacs-restored", "gui-hints.el"),
                                  ("controls-ready", "gui-controls.el"),
                                  ("scroll-ready", "gui-scroll.el"),
                                  ("scroll-ready", "gui-hold.el"),
                                  ("scroll-modal-ready", "gui-scroll-modal.el"),
-                                 ("web-emacs-restored", "gui-escape.el"),
+                                 ("chromel-emacs-restored", "gui-escape.el"),
                                  ("features-ready", "gui-features.el"),
-                                 ("web-emacs-restored", "gui-keymap.el"),
-                                 ("web-emacs-restored", "gui-pump.el"),
+                                 ("chromel-emacs-restored", "gui-keymap.el"),
+                                 ("chromel-emacs-restored", "gui-pump.el"),
                                  ("session-seed", "gui-session.el"),
                                  ("session-restore", "gui-session.el"),
                                  ("settings-seed", "gui-settings.el"),
                                  ("settings-restore", "gui-settings.el"),
                                  ("password-seed", "gui-passwords.el"),
-                                 ("password-restore", "gui-passwords.el")]:
+                                 ("password-restore", "gui-passwords.el"),
+                                 ("management", "gui-management.el")]:
             route = {'gui-passwords.el': '/passwords', 'gui-features.el': '/features', 'gui-controls.el': '/controls', 'gui-scroll.el': '/scroll', 'gui-hold.el': '/scroll',
                      'gui-scroll-modal.el': '/scroll-modal'}.get(script, '/fixture')
             test_url = url.replace('/fixture', route)
             result = pathlib.Path(temp) / "result"
             result.unlink(missing_ok=True)
-            env = dict(os.environ, WEB_TEST_PROFILE=temp + "/profile",
-                       WEB_TEST_RESULT=str(result), WEB_CEF_TEST_MODE="1",
-                       WEB_TEST_URL=test_url, WEB_TEST_EXPECT_TITLE=expected)
+            env = dict(os.environ, CHROMEL_TEST_PROFILE=temp + "/profile",
+                       CHROMEL_TEST_RESULT=str(result), CHROMEL_CEF_TEST_MODE="1",
+                       CHROMEL_TEST_URL=test_url, CHROMEL_TEST_EXPECT_TITLE=expected)
             if script == "gui-settings.el":
-                env["WEB_TEST_SETTINGS_PHASE"] = expected.removeprefix("settings-")
+                env["CHROMEL_TEST_SETTINGS_PHASE"] = expected.removeprefix("settings-")
             if script == "gui-passwords.el":
-                env["WEB_TEST_PASSWORD_PHASE"] = expected.removeprefix("password-")
+                env["CHROMEL_TEST_PASSWORD_PHASE"] = expected.removeprefix("password-")
             if script == "gui-session.el":
-                env["WEB_TEST_SESSION_PHASE"] = expected.removeprefix("session-")
+                env["CHROMEL_TEST_SESSION_PHASE"] = expected.removeprefix("session-")
             if script == "gui-escape.el":
-                env["WEB_TEST_FULLSCREEN"] = "1"
+                env["CHROMEL_TEST_FULLSCREEN"] = "1"
             log = pathlib.Path(temp) / "emacs.log"
             with log.open("w") as output:
                 process = subprocess.Popen(
@@ -136,8 +137,8 @@ try:
                 print(f"FAIL: GUI process exited ({status}) without a test result")
             if status:
                 raise SystemExit(status)
-            if script in ("gui-settings.el", "gui-passwords.el"):
-                assert "Web: skipping CefShutdown" not in log.read_text(), "Settings prevented clean CEF shutdown"
+            if script in ("gui-settings.el", "gui-passwords.el", "gui-management.el"):
+                assert "Chromel: skipping CefShutdown" not in log.read_text(), "Settings prevented clean CEF shutdown"
             history = json.loads((pathlib.Path(temp) / "profile/history.json").read_text())
             assert any(entry["url"] == test_url for entry in history), "History was not saved"
         print("PASS: Cookie, localStorage and history persist across two Emacs processes")

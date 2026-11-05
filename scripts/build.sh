@@ -25,4 +25,4 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_OSX_SYSROOT="$(xcrun --show-sdk-path)"
 cmake --build build --parallel "${BUILD_JOBS:-4}"
 python3 scripts/package.py "$CEF_ROOT" build
-echo 'Ready: ./scripts/launch.sh -Q, then M-x web.'
+echo 'Ready: ./scripts/launch.sh -Q, then M-x chromel.'

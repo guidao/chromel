@@ -6,6 +6,8 @@ import shutil
 import subprocess
 import sys
 
+from bundle_privacy import with_bluetooth_usage
+
 
 def plist(path, name, identifier, **extra):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -20,7 +22,7 @@ def plist(path, name, identifier, **extra):
 def main():
     cef = pathlib.Path(sys.argv[1]).resolve()
     build = pathlib.Path(sys.argv[2]).resolve()
-    bundle = build / "WebRuntime.app"
+    bundle = build / "ChromelRuntime.app"
     contents = bundle / "Contents"
     frameworks = contents / "Frameworks"
     frameworks.mkdir(parents=True, exist_ok=True)
@@ -28,22 +30,23 @@ def main():
     # ditto preserves framework symlinks, modes and resource layout.
     subprocess.run(["ditto", str(cef / "Release" / framework.name), str(framework)], check=True)
     (contents / "MacOS").mkdir(exist_ok=True)
-    shutil.copy2(build / "web-smoke", contents / "MacOS" / "WebRuntime")
-    plist(contents / "Info.plist", "WebRuntime", "org.emacs.web.runtime")
+    shutil.copy2(build / "chromel-smoke", contents / "MacOS" / "ChromelRuntime")
+    plist(contents / "Info.plist", "ChromelRuntime", "org.emacs.chromel.runtime",
+          **with_bluetooth_usage({}))
     (contents / "PkgInfo").write_bytes(b"APPL????")
     for suffix in ["", " (Alerts)", " (GPU)", " (Plugin)", " (Renderer)"]:
-        name = "Web Helper" + suffix
+        name = "Chromel Helper" + suffix
         helper = frameworks / (name + ".app")
         executable = helper / "Contents" / "MacOS" / name
         executable.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(build / "web-helper", executable)
-        identifier = "org.emacs.web.helper" + ("." + suffix.strip(" ()").lower() if suffix else "")
+        shutil.copy2(build / "chromel-helper", executable)
+        identifier = "org.emacs.chromel.helper" + ("." + suffix.strip(" ()").lower() if suffix else "")
         plist(helper / "Contents" / "Info.plist", name, identifier, LSUIElement=True)
         (helper / "Contents" / "PkgInfo").write_bytes(b"APPL????")
         subprocess.run(["codesign", "--force", "--sign", "-", str(helper)], check=True)
     # Local ad-hoc signature; distribution/notarization requires an identity.
     subprocess.run(["codesign", "--force", "--sign", "-", str(bundle)], check=True)
-    subprocess.run(["codesign", "--force", "--sign", "-", str(build / "web-module.dylib")], check=True)
+    subprocess.run(["codesign", "--force", "--sign", "-", str(build / "chromel-module.dylib")], check=True)
 
 
 if __name__ == "__main__":

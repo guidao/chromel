@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #import <Cocoa/Cocoa.h>
-#include "web_core.h"
+#include "chromel_core.h"
 #include <cstdio>
 #include <stdexcept>
 
 static void step() {
  @autoreleasepool {
-  web::pump();
+  chromel::pump();
   [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
                          beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
   NSEvent* event;
@@ -24,7 +24,7 @@ int main(int argc, char** argv) {
     fprintf(stderr, "This bundle hosts CEF for Emacs.\nUsage: %s --smoke-test TEMP_PROFILE\n", argv[0]);
     return 2;
   }
-  setenv("WEB_CEF_TEST_MODE", "1", 1);
+  setenv("CHROMEL_CEF_TEST_MODE", "1", 1);
   @autoreleasepool {
     try {
       [NSApplication sharedApplication];
@@ -32,57 +32,57 @@ int main(int argc, char** argv) {
       NSWindow* first = [[NSWindow alloc] initWithContentRect:NSMakeRect(100, 100, 800, 600)
           styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskResizable
           backing:NSBackingStoreBuffered defer:NO];
-      first.title = @"Web native smoke";
+      first.title = @"Chromel native smoke";
       [first makeKeyAndOrderFront:nil];
       [NSApp finishLaunching];
       long handle;
       int id;
       @autoreleasepool {
-      web::initialize(NSBundle.mainBundle.bundlePath.UTF8String, argv[2]);
-      handle = web::bind_window("Web native smoke");
-      id = web::create(handle,
-          "data:text/html,<meta charset=utf-8><title>web-smoke-ready</title>"
+      chromel::initialize(NSBundle.mainBundle.bundlePath.UTF8String, argv[2]);
+      handle = chromel::bind_window("Chromel native smoke");
+      id = chromel::create(handle,
+          "data:text/html,<meta charset=utf-8><title>chromel-smoke-ready</title>"
           "<body style='background:%23273846;color:white;font:32px sans-serif'>"
           "CEF inside a native NSView<input placeholder='Keyboard test'></body>");
-      web::layout(id, handle, 20, 40, 600, 400);
+      chromel::layout(id, handle, 20, 40, 600, 400);
       }
       bool loaded = false, title = false;
       NSDate* deadline = [NSDate dateWithTimeIntervalSinceNow:30];
       while (deadline.timeIntervalSinceNow > 0 && !(loaded && title)) {
         step();
-        auto events = web::events();
+        auto events = chromel::events();
         if (events != "[]") printf("%s\n", events.c_str());
         loaded |= events.find("loaded") != std::string::npos;
-        title |= events.find("web-smoke-ready") != std::string::npos;
+        title |= events.find("chromel-smoke-ready") != std::string::npos;
       }
       if (!loaded || !title) throw std::runtime_error("Timed out waiting for renderer/title/load callbacks");
-      @autoreleasepool { web::hide(id); }
+      @autoreleasepool { chromel::hide(id); }
       NSWindow* second;
       @autoreleasepool {
       second = [[NSWindow alloc] initWithContentRect:NSMakeRect(200, 200, 600, 450)
           styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
-      second.title = @"Web second host";
+      second.title = @"Chromel second host";
       [second makeKeyAndOrderFront:nil];
-        web::layout(id, web::bind_window("Web second host"), 10, 20, 500, 350);
+        chromel::layout(id, chromel::bind_window("Chromel second host"), 10, 20, 500, 350);
       }
       for (int i = 0; i < 20; ++i) step();
-      @autoreleasepool { web::command(id, "close", ""); }
+      @autoreleasepool { chromel::command(id, "close", ""); }
       bool closed = false;
       deadline = [NSDate dateWithTimeIntervalSinceNow:10];
       while (deadline.timeIntervalSinceNow > 0 && !closed) {
         step();
-        auto events = web::events();
+        auto events = chromel::events();
         closed = events.find("closed") != std::string::npos;
       }
       if (!closed) throw std::runtime_error("Browser did not close cleanly");
       if (!first.visible || !second.visible) throw std::runtime_error("Closing browser closed a host window");
-      printf("%s\n", web::info().c_str());
-      web::shutdown();
+      printf("%s\n", chromel::info().c_str());
+      chromel::shutdown();
       puts("PASS: renderer, navigation, layout, cross-window reparenting, hide, close, shutdown");
       return 0;
     } catch (const std::exception& error) {
       fprintf(stderr, "FAIL: %s\n", error.what());
-      web::shutdown();
+      chromel::shutdown();
       return 1;
     }
   }
