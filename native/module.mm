@@ -2,6 +2,7 @@
 #include <emacs-module.h>
 #include "chromel_core.h"
 #include <exception>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -18,7 +19,7 @@ emacs_value result(emacs_env* env, const std::string& value) {
   return env->make_string(env, value.data(), value.size());
 }
 enum Op { Init, Bind, Create, Layout, Hide, Command, Pump, Events, Info, Inspect, Shutdown };
-emacs_value call(emacs_env* env, ptrdiff_t, emacs_value* args, void* data) noexcept {
+emacs_value call(emacs_env* env, ptrdiff_t nargs, emacs_value* args, void* data) noexcept {
  @autoreleasepool {
   emacs_value nil = env->intern(env, "nil");
   try {
@@ -29,7 +30,10 @@ emacs_value call(emacs_env* env, ptrdiff_t, emacs_value* args, void* data) noexc
     Op op = static_cast<Op>(reinterpret_cast<intptr_t>(data));
     std::string first, second;
     int64_t numbers[6] = {};
-    if (op == Init) { first = string(0); second = string(1); }
+    if (op == Init) {
+      first = string(0); second = string(1);
+      if (nargs > 2 && env->is_not_nil(env, args[2])) numbers[0] = integer(2);
+    }
     if (op == Bind) first = string(0);
     if (op == Create) { numbers[0] = integer(0); first = string(1); }
     if (op == Layout) for (int i = 0; i < 6; ++i) numbers[i] = integer(i);
@@ -37,7 +41,10 @@ emacs_value call(emacs_env* env, ptrdiff_t, emacs_value* args, void* data) noexc
     if (op == Command) { first = string(1); second = string(2); }
     if (env->non_local_exit_check(env) != emacs_funcall_exit_return) return nil;
     switch (op) {
-      case Init: chromel::initialize(first, second); break;
+      case Init:
+        if (numbers[0] != 0 && (numbers[0] < 1024 || numbers[0] > 65535))
+          throw std::runtime_error("Remote debugging port must be between 1024 and 65535, or 0 to disable");
+        chromel::initialize(first, second, static_cast<int>(numbers[0])); break;
       case Bind: return env->make_integer(env, chromel::bind_window(first));
       case Create: return env->make_integer(env, chromel::create(numbers[0], first));
       case Layout: chromel::layout(numbers[0], numbers[1], numbers[2], numbers[3], numbers[4], numbers[5]); break;
@@ -63,7 +70,7 @@ extern "C" int emacs_module_init(emacs_runtime* runtime) noexcept {
   emacs_env* env = runtime->get_environment(runtime);
   struct Entry { const char* name; int count; Op op; const char* doc; };
   const Entry entries[] = {
-    {"init", 2, Init, "Initialize CEF using BUNDLE and PROFILE."},
+    {"init", 2, Init, "Initialize CEF using BUNDLE, PROFILE and optional DEBUGGING-PORT (nil disables)."},
     {"bind", 1, Bind, "Find and register the native window with TITLE."},
     {"create", 2, Create, "Create a browser in WINDOW loading URL."},
     {"layout", 6, Layout, "Position ID in WINDOW at X Y WIDTH HEIGHT (logical points)."},
@@ -79,7 +86,7 @@ extern "C" int emacs_module_init(emacs_runtime* runtime) noexcept {
     auto name = std::string("chromel--native-") + entry.name;
     emacs_value args[] = {
       env->intern(env, name.c_str()),
-      env->make_function(env, entry.count, entry.count, call, entry.doc,
+      env->make_function(env, entry.count, entry.op == Init ? 3 : entry.count, call, entry.doc,
                          reinterpret_cast<void*>(static_cast<intptr_t>(entry.op)))};
     env->funcall(env, env->intern(env, "fset"), 2, args);
   }

@@ -63,6 +63,7 @@ bool settingsTestSuccess = false;
 NSMutableArray<NSDictionary*>* queue;
 NSMapTable<NSNumber*, NSWindow*>* windows;
 bool initialized = false;
+int remoteDebuggingPort = 0;
 bool stopped = false;
 bool pumping = false;
 std::unique_ptr<ChromelHostWakeup> hostWakeup;
@@ -633,8 +634,10 @@ NSEvent* routeKeyEvent(NSEvent* event) {
 }  // namespace
 
 namespace chromel {
-void initialize(const std::string& bundle, const std::string& profile) {
+void initialize(const std::string& bundle, const std::string& profile, int debuggingPort) {
   checkThread();
+  if (debuggingPort != 0 && (debuggingPort < 1024 || debuggingPort > 65535))
+    throw std::runtime_error("Remote debugging port must be between 1024 and 65535, or 0 to disable");
   std::filesystem::create_directories(profile + "/Default");
   const auto canonicalProfile = std::filesystem::canonical(profile).string();
   testMode = getenv("CHROMEL_CEF_TEST_MODE") && std::string(getenv("CHROMEL_CEF_TEST_MODE")) == "1";
@@ -646,6 +649,8 @@ void initialize(const std::string& bundle, const std::string& profile) {
   if (stopped) throw std::runtime_error("CEF cannot be restarted in this Emacs process");
   if (initialized) {
     if (canonicalProfile != profilePath) throw std::runtime_error("Restart Emacs to change CEF profiles");
+    if (debuggingPort != remoteDebuggingPort)
+      throw std::runtime_error("Restart Emacs to change the remote debugging port");
     return;
   }
   if (!NSApp) throw std::runtime_error("A running Cocoa application is required");
@@ -668,6 +673,7 @@ void initialize(const std::string& bundle, const std::string& profile) {
   windows = [NSMapTable strongToWeakObjectsMapTable];
   CefSettings settings;
   settings.command_line_args_disabled = true;
+  settings.remote_debugging_port = debuggingPort;
   // With the default macOS pump, CefDoMessageLoopWork can call [NSApp run]
   // when Emacs has temporarily stopped AppKit's loop.  Reentering EmacsApp.run
   // from a Lisp timer corrupts AppKit autorelease-pool lifetime.  The external
@@ -698,6 +704,7 @@ void initialize(const std::string& bundle, const std::string& profile) {
     throw std::runtime_error("CEF initialization failed; inspect the profile cef.log and restart Emacs");
   }
   profilePath = canonicalProfile;
+  remoteDebuggingPort = debuggingPort;
   initialized = true;
   hostWakeup = std::make_unique<ChromelHostWakeup>();
 }

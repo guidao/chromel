@@ -264,6 +264,29 @@ Chromium 的启动页、搜索引擎等选项不会替代 `chromel-home-url`、E
 
 超时默认 5 秒；脚本异常、页面导航、关闭或请求取消会调用 `:on-error`，参数包含 `:type` 和 `:message`。未提供错误回调时，在 Emacs 回显区显示错误。取消和超时只停止等待结果，不会中断脚本或撤销已经发生的页面操作。
 
+## 通过 Playwright 控制页面
+
+在首次打开 Chromel 前设置远程调试端口（等效于 Chromium 的 `--remote-debugging-port=9222`）：
+
+```elisp
+(setq chromel-remote-debugging-port 9222)
+```
+
+默认值为 `nil`，关闭远程调试；端口范围为 1024–65535。修改后需完整重启 Emacs。打开网页后，使用 Playwright 的 [CDP 连接接口](https://playwright.dev/python/docs/api/class-browsertype#browser-type-connect-over-cdp) 操作现有页面：
+
+```python
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as p:
+    browser = p.chromium.connect_over_cdp("http://127.0.0.1:9222")
+    page = next(page for context in browser.contexts for page in context.pages
+                if page.url.startswith("https://example.org"))
+    print(page.title())
+    print(page.evaluate("document.body.innerText"))
+```
+
+将示例中的 URL 替换为已在 Chromel 中打开的页面。连接使用 Chromel 的现有页面和登录状态；退出 Playwright 连接后可以继续在 Emacs 中浏览。
+
 ## 数据和能力边界
 
 默认数据在 `~/.emacs.d/chromel/`（实际相对 `user-emacs-directory`）：

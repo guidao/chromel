@@ -24,6 +24,13 @@
   "Compiled native module." :type 'file)
 (defcustom chromel-runtime-directory (expand-file-name "build/ChromelRuntime.app" chromel--directory)
   "CEF runtime bundle." :type 'directory)
+(defcustom chromel-remote-debugging-port nil
+  "Local Chrome DevTools Protocol port, or nil to disable remote debugging.
+Use an integer from 1024 through 65535.  This is equivalent to Chromium's
+--remote-debugging-port option and allows clients such as Playwright to
+connect to existing pages.  Set before starting Chromel; restart Emacs
+after changing it."
+  :type '(choice (const :tag "Disabled" nil) (integer :tag "Port")))
 (defun chromel--default-data-directory ()
   "Prefer Chromel data, reusing an existing Web directory on upgrade."
   (let ((current (expand-file-name "chromel/" user-emacs-directory))
@@ -66,7 +73,7 @@ Held j/k use `chromel-scroll-speed` after the initial step."
   :type 'natnum)
 (defvar-local chromel--scroll-settings nil)
 
-(declare-function chromel--native-init "chromel-module" (bundle profile))
+(declare-function chromel--native-init "chromel-module" (bundle profile &optional debugging-port))
 (declare-function chromel--native-bind "chromel-module" (title))
 (declare-function chromel--native-create "chromel-module" (window url))
 (declare-function chromel--native-layout "chromel-module" (id window x y width height))
@@ -143,6 +150,10 @@ Held j/k use `chromel-scroll-speed` after the initial step."
 (defun chromel--start ()
   (chromel--session-load)
   (unless chromel--initialized
+    (unless (or (null chromel-remote-debugging-port)
+                (and (integerp chromel-remote-debugging-port)
+                     (<= 1024 chromel-remote-debugging-port 65535)))
+      (user-error "chromel-remote-debugging-port must be nil or an integer from 1024 to 65535"))
     (unless (and (eq system-type 'darwin) (eq window-system 'ns)
                  (fboundp 'module-load))
       (user-error "Chromel requires a Cocoa Emacs with dynamic module support"))
@@ -159,7 +170,8 @@ Held j/k use `chromel-scroll-speed` after the initial step."
              (expand-file-name "Contents/Frameworks/Chromium Embedded Framework.framework" host))
         (setq chromel-runtime-directory host)))
     (chromel--native-init (directory-file-name (expand-file-name chromel-runtime-directory))
-                      (expand-file-name "profile" chromel-data-directory))
+                         (expand-file-name "profile" chromel-data-directory)
+                         chromel-remote-debugging-port)
     (setq chromel--initialized t)
     (chromel--history-load)
     (add-hook 'window-size-change-functions #'chromel--sync)

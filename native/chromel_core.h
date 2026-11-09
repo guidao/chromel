@@ -3,7 +3,7 @@
 #include <string>
 
 namespace chromel {
-void initialize(const std::string& bundle, const std::string& profile);
+void initialize(const std::string& bundle, const std::string& profile, int debuggingPort = 0);
 long bind_window(const std::string& title);
 int create(long window, const std::string& url);
 void layout(int id, long window, double x, double y, double width, double height);
