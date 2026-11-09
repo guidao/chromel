@@ -82,6 +82,7 @@ try:
         for expected, script in [("chromel-emacs-ready", "gui-smoke.el"),
                                  ("chromel-emacs-restored", "gui-smoke.el"),
                                  ("chromel-emacs-restored", "gui-hints.el"),
+                                 ("chromel-emacs-restored", "gui-script.el"),
                                  ("controls-ready", "gui-controls.el"),
                                  ("scroll-ready", "gui-scroll.el"),
                                  ("scroll-ready", "gui-hold.el"),

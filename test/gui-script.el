@@ -1,0 +1,86 @@
+;;; gui-script.el --- Real renderer script API regression -*- lexical-binding: t; -*-
+(require 'chromel)
+(setq chromel-data-directory (file-name-as-directory (getenv "CHROMEL_TEST_PROFILE")))
+(when (getenv "CHROMEL_TEST_MODULE")
+  (setq chromel-native-module (getenv "CHROMEL_TEST_MODULE")))
+
+(defun chromel-script-gui--assert (value description)
+  (unless value (error "%s" description)))
+
+(defun chromel-script-gui--wait (predicate)
+  (let ((deadline (+ (float-time) 8)))
+    (while (and (not (funcall predicate)) (< (float-time) deadline))
+      (accept-process-output nil 0.01))
+    (chromel-script-gui--assert (funcall predicate) "Script callback timed out")))
+
+(defun chromel-script-gui--execute (script &optional timeout)
+  (let (done result failure)
+    (chromel-execute-script nil script
+                           (lambda (value) (setq result value done t))
+                           :on-error (lambda (err) (setq failure err done t))
+                           :timeout (or timeout 5))
+    (chromel-script-gui--assert (not done) "Callback was synchronous")
+    (chromel-script-gui--wait (lambda () done))
+    (list result failure)))
+
+(defun chromel-script-gui--run ()
+  (condition-case err
+      (progn
+        (chromel (getenv "CHROMEL_TEST_URL"))
+        (chromel-script-gui--wait (lambda () (string-prefix-p "chromel-emacs-" chromel--title)))
+        (dolist (entry '(("'中文'" "中文") ("42" 42) ("2.5" 2.5)
+                         ("true" t) ("false" :false) ("null" :null) ("undefined" :undefined)
+                         ("[1,false,null]" [1 :false :null])
+                         ("({name:'中文',count:2})" ((name . "中文") (count . 2)))
+                         ("var chromelScriptCounter=0; ++chromelScriptCounter" 1)
+                         ("chromelScriptCounter" 1)))
+          (let ((actual (chromel-script-gui--execute (car entry))))
+            (chromel-script-gui--assert
+             (equal actual (list (cadr entry) nil))
+             (format "Wrong result for %s: %S" (car entry) actual))))
+        (dolist (script '("throw new Error('expected failure')" "(()" "1n"
+                          "(()=>{const x={};x.self=x;return x})()"
+                          "(()=>{})" "Promise.resolve(42)"))
+          (let ((result (chromel-script-gui--execute script)))
+            (chromel-script-gui--assert (eq (plist-get (cadr result) :type) 'javascript)
+                                       (format "Expected JavaScript error for %s: %S" script result))))
+        (let (results errors)
+          (dotimes (n 5)
+            (chromel-execute-script nil (number-to-string n)
+                                   (lambda (v) (push v results))
+                                   :on-error (lambda (e) (push e errors))))
+          ;; The existing synchronous hint transport must remain independent.
+          (chromel-script-gui--assert (= (chromel--eval "JSON.stringify(99)") 99)
+                                     "Private eval was disrupted")
+          (chromel-script-gui--wait (lambda () (= (+ (length results) (length errors)) 5)))
+          (chromel-script-gui--assert (and (not errors) (equal (sort results #'<) '(0 1 2 3 4)))
+                                     "Concurrent requests lost results"))
+        (let* ((result (chromel-script-gui--execute
+                        "(()=>{const end=performance.now()+250;while(performance.now()<end){};return 42})()"
+                        0.01)))
+          (chromel-script-gui--assert (eq (plist-get (cadr result) :type) 'timeout)
+                                     (format "Expected timeout: %S" result)))
+        (accept-process-output nil 0.4)
+        (chromel-script-gui--assert (equal (chromel-script-gui--execute "43") '(43 nil))
+                                   "Late reply disrupted next request")
+        (let (result failure)
+          (let ((token (chromel-execute-script nil "44" (lambda (v) (setq result v))
+                                               :on-error (lambda (e) (setq failure e)))))
+            (chromel-cancel-script token))
+          (chromel-script-gui--wait (lambda () failure))
+          (chromel-script-gui--assert (and (not result) (eq (plist-get failure :type) 'cancelled))
+                                     "Cancellation failed"))
+        (let (failure)
+          (chromel-execute-script nil "45" nil :on-error (lambda (e) (setq failure e)))
+          (kill-buffer (current-buffer))
+          (chromel-script-gui--wait (lambda () failure))
+          (chromel-script-gui--assert (eq (plist-get failure :type) 'closed) "Close did not cancel"))
+        (chromel-script-gui--assert (= 0 (hash-table-count chromel--script-requests)) "Leaked requests")
+        (with-temp-file (getenv "CHROMEL_TEST_RESULT")
+          (insert "PASS: script values, exceptions, serialization, concurrent requests, private eval, timeout, cancellation and close\n"))
+        (kill-emacs 0))
+    (error
+     (with-temp-file (getenv "CHROMEL_TEST_RESULT") (insert (format "FAIL: %S\n" err)))
+     (kill-emacs 1))))
+
+(run-at-time 0.1 nil #'chromel-script-gui--run)

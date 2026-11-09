@@ -19,6 +19,7 @@
 #include "include/wrapper/cef_helpers.h"
 #include "include/wrapper/cef_library_loader.h"
 #include <map>
+#include <set>
 #include <filesystem>
 #include <memory>
 #include <cmath>
@@ -36,6 +37,7 @@ struct Page {
   bool closing = false;
   bool selected = false;
   std::string pendingEval;
+  std::set<std::string> pendingScripts;
   std::string pendingFind;
   int completedFind = -1;
   std::string inputFrame;
@@ -111,6 +113,13 @@ void emit(int id, NSString* type, NSString* value = @"") {
   if (!id) return;
   // Every callback used here is delivered on the CEF UI (Cocoa main) thread.
   [queue addObject:@{@"id": @(id), @"type": type, @"value": value ?: @""}];
+}
+void scriptResult(int id, const std::string& token, bool ok, const std::string& result,
+                  bool undefined = false, NSString* error = @"javascript") {
+  NSDictionary* response = @{@"token": ns(token), @"ok": @(ok), @"result": ns(result),
+                             @"undefined": @(undefined), @"error": error};
+  NSData* data = [NSJSONSerialization dataWithJSONObject:response options:0 error:nil];
+  emit(id, @"script", [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]);
 }
 std::shared_ptr<Page> pageFor(int id) {
   auto found = pages.find(id);
@@ -282,8 +291,18 @@ class Client final : public CefClient,
       }
       return true;
     }
-    if (source != PID_RENDERER || message->GetName() != "chromel.eval.result" || !frame->IsMain())
+    if (source != PID_RENDERER || !frame || !frame->IsMain())
       return false;
+    if (message->GetName() == "chromel.execute-script.result") {
+      auto found = pages.find(id_);
+      auto args = message->GetArgumentList();
+      const auto token = args->GetString(0).ToString();
+      if (found != pages.end() && !found->second->closing &&
+          found->second->pendingScripts.erase(token))
+        scriptResult(id_, token, args->GetBool(1), args->GetString(2).ToString(), args->GetBool(3));
+      return true;
+    }
+    if (message->GetName() != "chromel.eval.result") return false;
     auto found = pages.find(id_);
     auto args = message->GetArgumentList();
     const auto token = args->GetString(0).ToString();
@@ -371,6 +390,14 @@ class Client final : public CefClient,
   }
   void OnLoadingStateChange(CefRefPtr<CefBrowser>, bool loading, bool, bool) override {
     emit(id_, @"loading", loading ? @"1" : @"0");
+  }
+  void OnLoadStart(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame, TransitionType) override {
+    if (!frame->IsMain()) return;
+    auto found = pages.find(id_);
+    if (found == pages.end()) return;
+    for (const auto& token : found->second->pendingScripts)
+      scriptResult(id_, token, false, "Page navigated before the script completed", false, @"navigation");
+    found->second->pendingScripts.clear();
   }
   void OnLoadEnd(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame, int status) override {
     if (frame->IsMain() && status < 400) emit(id_, @"loaded");
@@ -890,18 +917,25 @@ void command(int id, const std::string& action, const std::string& argument) {
     browser->GetHost()->SendMouseClickEvent(event, MBT_LEFT, false, 1);
     browser->GetHost()->SendMouseClickEvent(event, MBT_LEFT, true, 1);
   }
-  else if (action == "eval") {
+  else if (action == "cancel-script") {
+    page->pendingScripts.erase(argument);
+  }
+  else if (action == "execute-script" || action == "eval") {
     NSData* data = [ns(argument) dataUsingEncoding:NSUTF8StringEncoding];
     NSDictionary* request = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
     if (![request isKindOfClass:NSDictionary.class] ||
         ![request[@"token"] isKindOfClass:NSString.class] ||
         ![request[@"script"] isKindOfClass:NSString.class])
       throw std::runtime_error("Invalid JavaScript request");
-    page->pendingEval = utf8(request[@"token"]);
-    auto message = CefProcessMessage::Create("chromel.eval");
-    message->GetArgumentList()->SetString(0, page->pendingEval);
+    const auto token = utf8(request[@"token"]);
+    auto frame = browser->GetMainFrame();
+    if (!frame || !frame->IsValid()) throw std::runtime_error("Page JavaScript frame is not ready");
+    if (action == "execute-script") page->pendingScripts.insert(token);
+    else page->pendingEval = token;
+    auto message = CefProcessMessage::Create(action == "execute-script" ? "chromel.execute-script" : "chromel.eval");
+    message->GetArgumentList()->SetString(0, token);
     message->GetArgumentList()->SetString(1, utf8(request[@"script"]));
-    browser->GetMainFrame()->SendProcessMessage(PID_RENDERER, message);
+    frame->SendProcessMessage(PID_RENDERER, message);
   }
   else if (action == "javascript") {
     browser->GetMainFrame()->ExecuteJavaScript(argument, "", 1);

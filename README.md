@@ -245,6 +245,25 @@ Chromium 的启动页、搜索引擎等选项不会替代 `chromel-home-url`、E
 
 `C-c w S` 可随时立即保存。自动保存关闭时，该命令仍可手动保存。
 
+## 从 Elisp 执行页面脚本
+
+`chromel-execute-script` 在指定网页的主文档中异步执行 JavaScript，通过回调返回结果，无需开启远程调试端口。在已经加载网页的 Chromel buffer 中执行：
+
+```elisp
+(chromel-execute-script
+ (current-buffer)
+ "document.title"
+ (lambda (title) (message "页面标题：%s" title))
+ :on-error (lambda (err) (message "执行失败：%s" (plist-get err :message)))
+ :timeout 5)
+```
+
+第一个参数可以是 buffer、buffer 名称或 `nil`（当前 buffer）；不需要成功回调时，第三个参数传 `nil`。调用立即返回请求 token，可传给 `chromel-cancel-script` 取消等待。支持同一页面上的多个并发请求，回调在目标 buffer 中执行；若 buffer 已关闭，错误回调仍会执行。
+
+结果按 JSON 转换：对象为符号键 alist，数组为 vector，`false`、`null`、`undefined` 分别为 `:false`、`:null`、`:undefined`。脚本按原样执行，无需手动调用 `JSON.stringify`。首版不等待 Promise；返回 Promise、循环引用或 BigInt 等无法序列化的值会报错。
+
+超时默认 5 秒；脚本异常、页面导航、关闭或请求取消会调用 `:on-error`，参数包含 `:type` 和 `:message`。未提供错误回调时，在 Emacs 回显区显示错误。取消和超时只停止等待结果，不会中断脚本或撤销已经发生的页面操作。
+
 ## 数据和能力边界
 
 默认数据在 `~/.emacs.d/chromel/`（实际相对 `user-emacs-directory`）：
