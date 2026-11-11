@@ -612,6 +612,33 @@ NSEvent* routeKeyEvent(NSEvent* event) {
       return nil;
     }
   }
+  // Emacs owns the application menu/key equivalents, so Chromium's embedded
+  // view cannot rely on the usual Cocoa Edit menu to dispatch these commands.
+  // Only intercept while the native page owns focus: a visible/selected page
+  // must never capture shortcuts from Emacs or its minibuffer.
+  const auto editingFlags = flags & (NSEventModifierFlagCommand | NSEventModifierFlagControl |
+                                     NSEventModifierFlagOption | NSEventModifierFlagShift);
+  const bool commandOnly = editingFlags == NSEventModifierFlagCommand;
+  const bool redo = editingFlags == (NSEventModifierFlagCommand | NSEventModifierFlagShift) &&
+    [key isEqualToString:@"z"];
+  if ((commandOnly && [@[@"c", @"v", @"x", @"a", @"z"] containsObject:key]) || redo) {
+    for (const auto& item : pages) {
+      const auto& page = item.second;
+      if (page->closing || page->container.hidden || event.window != page->container.window ||
+          !ownsFocus(page) || !page->browser) continue;
+      auto frame = page->browser->GetFocusedFrame();
+      if (!frame || !frame->IsValid()) return event;
+      // Native editing preserves rich clipboard formats and DOM copy/paste
+      // events, and works in cross-origin frames without reading their DOM.
+      if (redo) frame->Redo();
+      else if ([key isEqualToString:@"c"]) frame->Copy();
+      else if ([key isEqualToString:@"v"]) frame->Paste();
+      else if ([key isEqualToString:@"x"]) frame->Cut();
+      else if ([key isEqualToString:@"a"]) frame->SelectAll();
+      else frame->Undo();
+      return nil;
+    }
+  }
   // Route before Emacs/Cocoa handles Escape as a fullscreen key equivalent.
   const bool prefix = (flags & NSEventModifierFlagControl) &&
     [@[@"x", @"c", @"h", @"g"] containsObject:key];
@@ -796,6 +823,28 @@ void hide(int id) {
 
 void command(int id, const std::string& action, const std::string& argument) {
   requireReady();
+  if (id == 0 && testMode &&
+      (action == "test-clipboard-save" || action == "test-clipboard-restore")) {
+    // Preserve every pasteboard representation, including rich text/images.
+    static NSMutableArray<NSPasteboardItem*>* saved;
+    NSPasteboard* clipboard = NSPasteboard.generalPasteboard;
+    if (action == "test-clipboard-save") {
+      saved = [NSMutableArray array];
+      for (NSPasteboardItem* item in clipboard.pasteboardItems) {
+        NSPasteboardItem* copy = [[NSPasteboardItem alloc] init];
+        for (NSPasteboardType type in item.types) {
+          NSData* data = [item dataForType:type];
+          if (data) [copy setData:data forType:type];
+        }
+        [saved addObject:copy];
+      }
+    } else if (saved) {
+      [clipboard clearContents];
+      if (saved.count) [clipboard writeObjects:saved];
+      saved = nil;
+    }
+    return;
+  }
   if (id == 0 && action == "settings") { openSettings(argument); return; }
   if (id == 0 && action == "close-settings") { closeSettings(); return; }
   if (id == 0 && action == "test-settings-close-window" && testMode) {
@@ -984,16 +1033,28 @@ void command(int id, const std::string& action, const std::string& argument) {
     if (action == "test-command-down" || action == "test-command-up") routeKeyEvent(event);
     else [NSApp sendEvent:event];
   }
+  else if (action == "test-activate" && testMode) {
+    [page->container.window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+    browser->GetHost()->SetFocus(true);
+  }
   else if (action == "test-key" && testMode) {
-    if (argument != "j" && argument != "k" && argument != "escape") throw std::runtime_error("Unsupported test key");
+    NSDictionary* codes = @{@"j": @38, @"k": @40, @"escape": @53,
+                            @"s-c": @8, @"s-v": @9, @"s-x": @7, @"s-a": @0,
+                            @"s-z": @6, @"s-Z": @6};
+    NSNumber* code = codes[ns(argument)];
+    if (!code) throw std::runtime_error("Unsupported test key");
+    const bool command = argument.starts_with("s-");
+    const auto modifiers = command ? NSEventModifierFlagCommand |
+      (argument == "s-Z" ? NSEventModifierFlagShift : 0) : 0;
     // Exercise real Cocoa -> CEF keyboard dispatch, not the Lisp scroll command.
-    NSString* characters = argument == "escape" ? @"\x1b" : ns(argument);
+    NSString* characters = argument == "escape" ? @"\x1b" : ns(command ? argument.substr(2) : argument);
     for (auto type : {NSEventTypeKeyDown, NSEventTypeKeyUp}) {
-      NSEvent* event = [NSEvent keyEventWithType:type location:NSZeroPoint modifierFlags:0
+      NSEvent* event = [NSEvent keyEventWithType:type location:NSZeroPoint modifierFlags:modifiers
         timestamp:NSProcessInfo.processInfo.systemUptime windowNumber:page->container.window.windowNumber
         context:nil characters:characters charactersIgnoringModifiers:characters
-        isARepeat:NO keyCode:argument == "escape" ? 53 : (argument == "j" ? 38 : 40)];
-      if (argument == "escape") [NSApp postEvent:event atStart:NO];
+        isARepeat:NO keyCode:code.unsignedShortValue];
+      if (argument == "escape" || (command && !ownsFocus(page))) [NSApp postEvent:event atStart:NO];
       else [NSApp sendEvent:event];
     }
   }

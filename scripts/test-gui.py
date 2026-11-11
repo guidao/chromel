@@ -77,6 +77,7 @@ class Fixture(http.server.BaseHTTPRequestHandler):
 server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 url = f"http://127.0.0.1:{server.server_port}/fixture"
+selected = os.environ.get("CHROMEL_TEST_SCRIPTS", "").split()
 try:
     with tempfile.TemporaryDirectory(prefix="emacs-chromel-smoke-") as temp:
         for expected, script in [("chromel-emacs-ready", "gui-smoke.el"),
@@ -88,6 +89,7 @@ try:
                                  ("scroll-ready", "gui-hold.el"),
                                  ("scroll-modal-ready", "gui-scroll-modal.el"),
                                  ("chromel-emacs-restored", "gui-escape.el"),
+                                 ("chromel-emacs-restored", "gui-clipboard.el"),
                                  ("features-ready", "gui-features.el"),
                                  ("chromel-emacs-restored", "gui-keymap.el"),
                                  ("chromel-emacs-restored", "gui-pump.el"),
@@ -98,6 +100,10 @@ try:
                                  ("password-seed", "gui-passwords.el"),
                                  ("password-restore", "gui-passwords.el"),
                                  ("management", "gui-management.el")]:
+            # Later fixture tests expect the cookie/localStorage state seeded
+            # by the two smoke runs, including when selecting a smaller suite.
+            if selected and script not in selected and script != "gui-smoke.el":
+                continue
             route = {'gui-passwords.el': '/passwords', 'gui-features.el': '/features', 'gui-controls.el': '/controls', 'gui-scroll.el': '/scroll', 'gui-hold.el': '/scroll',
                      'gui-scroll-modal.el': '/scroll-modal'}.get(script, '/fixture')
             test_url = url.replace('/fixture', route)
@@ -142,7 +148,8 @@ try:
                 assert "Chromel: skipping CefShutdown" not in log.read_text(), "Settings prevented clean CEF shutdown"
             history = json.loads((pathlib.Path(temp) / "profile/history.json").read_text())
             assert any(entry["url"] == test_url for entry in history), "History was not saved"
-        print("PASS: Cookie, localStorage and history persist across two Emacs processes")
+        print("PASS: Selected GUI regressions" if selected else
+              "PASS: Cookie, localStorage and history persist across two Emacs processes")
 finally:
     server.shutdown()
     server.server_close()
