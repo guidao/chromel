@@ -358,7 +358,13 @@
     (cl-letf (((symbol-function 'current-kill) (lambda (&rest _) "  ")))
       (should-error (chromel-open-copied-url) :type 'user-error))))
 
+(defun chromel-test--module-available-p ()
+  "Return non-nil when the native module has been built on this machine."
+  (and (fboundp 'module-load) (file-exists-p chromel-native-module)))
+
 (ert-deftest chromel-settings-routes-without-creating-or-selecting-a-tab ()
+  ;; This walks the real settings-URL predicate, which lives in the module.
+  (skip-unless (chromel-test--module-available-p))
   ;; Load first: module-load refs every chromel--native-* binding, which would
   ;; replace the stubs installed by cl-letf below.
   (let (calls)
@@ -399,6 +405,7 @@
         (should-not calls)))))
 
 (ert-deftest chromel-management-events-do-not-unfocus-the-source-or-create-tabs ()
+  (skip-unless (chromel-test--module-available-p))
   (let ((chromel--pages (make-hash-table)) calls)
     (with-temp-buffer
       (puthash 7 (current-buffer) chromel--pages)
@@ -480,20 +487,20 @@
 
 (ert-deftest chromel-browser-count-is-safe-before-cef ()
   "The pump asks for the count before CEF is up, so it must not require CEF."
-  (skip-unless (file-exists-p chromel-native-module))
+  (skip-unless (chromel-test--module-available-p))
   (skip-unless (not chromel--initialized))
   (chromel--ensure-module)
   (should (eql 0 (chromel--native-browser-count))))
 
 (ert-deftest chromel-module-api-matches-elisp ()
   "The built dylib must report the API this file was written against."
-  (skip-unless (file-exists-p chromel-native-module))
+  (skip-unless (chromel-test--module-available-p))
   (chromel--ensure-module)
   (should (eql (chromel--native-api-version) chromel-module-api-version)))
 
 (ert-deftest chromel-module-api-mismatch-is-loud ()
   "A module without the accessor, or with another number, must not run."
-  (skip-unless (file-exists-p chromel-native-module))
+  (skip-unless (chromel-test--module-available-p))
   (chromel--ensure-module)
   (cl-letf (((symbol-function 'chromel--native-api-version) nil))
     (should-error (chromel--check-module-api) :type 'user-error))

@@ -9,18 +9,26 @@ on:
 jobs:
   elisp:
     name: elisp (ERT, no GUI)
-    runs-on: macos-13
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Emacs
         run: |
-          brew install emacs
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends emacs-nox
           emacs --version | head -1
       - name: ERT
-        run: emacs --batch -L . -L test -l test/chromel-test.el -f ert-run-tests-batch-and-exit
+        # A stale byte-compiled chromel.elc shadows chromel.el, so never keep one.
+        run: |
+          find . -name '*.elc' -delete
+          emacs --batch -L . -L test -l test/chromel-test.el -f ert-run-tests-batch-and-exit
 
   native:
     name: native (build + module API)
+    # The hosted macOS runners are either rejected outright (macos-14) or sit
+    # queued until the 24 h timeout (macos-13), so this job is manual-only until
+    # a runner is available; see TODO.md.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: macos-13
     steps:
       - uses: actions/checkout@v4
@@ -50,4 +58,6 @@ jobs:
             --eval '(module-load "./build/chromel-module.dylib")' \
             --eval '(unless (eql (chromel--native-api-version) chromel-module-api-version) (kill-emacs 1))'
       - name: ERT with the built module
-        run: emacs --batch -L . -L test -l test/chromel-test.el -f ert-run-tests-batch-and-exit
+        run: |
+          find . -name '*.elc' -delete
+          emacs --batch -L . -L test -l test/chromel-test.el -f ert-run-tests-batch-and-exit
