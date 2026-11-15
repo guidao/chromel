@@ -95,3 +95,8 @@ emacs --batch -L . -L test -l test/chromel-test.el -f ert-run-tests-batch-and-ex
 python3 scripts/test-gui.py              # 19 项，约 4-5 分钟，会抢焦点
 CHROMEL_TEST_ONLY=smoke,hints python3 scripts/test-gui.py   # 子集
 ```
+
+## 已知外部问题（不是本项目的 bug）
+
+- **删除已被输入法接管的 frame 会让 Emacs 31.1 abort**：`make-frame` → 等待（哪怕 1 秒）→ `delete-frame`，崩溃于 `-[EmacsView selectedRange]`（经 `handleTSMEvent` 从 IMK 进入），随后 `emacs_abort`。`emacs -Q`、不加载 chromel、不启动 CEF 也能复现（5/5），属于 Emacs/macOS 交互缺陷。项目侧规避：`test/gui-smoke.el` 用 `make-frame-invisible` 代替 `delete-frame`（提交 `136f5e3`）。若将来要覆盖"删除 frame"的清理路径，需要先确认上游修好。
+- **GitHub macOS runner 不可用**：`macos-14` 报 `The configuration 'macos-14-arm64-us-default' is not supported`；`macos-13` 被接受但长期 queued 直到 24 小时被取消。CI 的 `elisp` 作业可改 `ubuntu-latest`，`native` 作业保留手动触发。
