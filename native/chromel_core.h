@@ -5,8 +5,11 @@
 namespace chromel {
 // Bumped whenever a chromel--native-* signature or semantic changes; the elisp
 // side refuses to run against a module that reports a different number.
-constexpr int kChromelApiVersion = 1;
+constexpr int kChromelApiVersion = 2;
 int api_version();
+// How many CEF browsers (embedded pages or settings windows) are alive.
+// Safe before CefInitialize.
+int browser_count();
 void initialize(const std::string& bundle, const std::string& profile);
 long bind_window(const std::string& title);
 bool is_settings_url(const std::string& url);

@@ -41,8 +41,8 @@
 **做法**：一张 `{name, arity, parse, run}` 表 + 请求结构体；未知动作仍抛 `Unknown browser action`。
 **收益**：新增动作不再复制解析样板；argv 校验可单测。
 
-### B2 空队列仍做 JSON 往返
-`native/chromel_core.mm:1075-1080`：每 tick 都 `dataWithJSONObject:` 一次，即使队列为空。**做法**：序列化前加 `if (queue.count == 0) return "[]";`，并考虑用可变字符串缓冲累计事件。
+### B2 ✅ 空队列不再做 JSON 往返
+`events()` 在 `requireReady()` 之后直接 `if (queue.count == 0) return "[]";`，空闲 tick 不再走 `NSJSONSerialization`。返回值与序列化空数组完全一致（`gui-*` 的 `--chromel-last` / 事件处理未受影响，ERT 35/35）。
 
 ### B3 DevTools 是死路
 `native/chromel_core.mm:1060` 用 `new Client(0)`，而 `emit()` 对 id 0 直接返回（`:126-127`），`pageFor(0)` 也无效——DevTools 窗口不产生任何事件。**做法**：给 DevTools 专门 client/负 id，或显式声明"仅供人工调试、不参与事件"。
@@ -51,7 +51,7 @@
 `chromel.el:838-840` 每次 `insert-file-contents "native/hints.js"`，而 `scroll.js` 是构建期内嵌（`CMakeLists.txt:32-34`）。**做法**：统一由 CMake 生成头文件，Elisp 侧只取字符串。
 
 ### B5 ✅ 没有 Elisp↔模块 ABI 握手
-`chromel_core.h` 新增 `kChromelApiVersion`（=1）与 `api_version()`，模块导出 `chromel--native-api-version`；`chromel-module-api-version` 与 `chromel--check-module-api` 在 `chromel--ensure-module` 末尾断言，缺函数或数字不符都直接 `user-error` 并提示 `./scripts/build.sh`。ERT 增 2 条（一致、`nil` 与 `99` 两种不符），31/31 通过。
+`chromel_core.h` 新增 `kChromelApiVersion`（C5 之后为 2）与 `api_version()`，模块导出 `chromel--native-api-version`；`chromel-module-api-version` 与 `chromel--check-module-api` 在 `chromel--ensure-module` 末尾断言，缺函数或数字不符都直接 `user-error` 并提示 `./scripts/build.sh`。ERT 增 2 条（一致、`nil` 与 `99` 两种不符），31/31 通过（C5 升到 2 后为 35/35）。
 
 ### B6 testMode 渗进生产路径
 `command()`/`click`/`initialize()` 里散落 `testMode` 分支。**做法**：收敛到单一 `isTestMode()` + 一处文档说明，避免将来在正式路径误开。
@@ -64,21 +64,21 @@
 
 ## C. 行为与 UX
 
-### C1 延迟标签的半初始化
-`chromel--pending`（`chromel.el:119`，判定见 `:219`、`:346`）的 buffer 在激活前没有浏览器/几何。所有命令都必须先 `chromel--ensure-browser`；补一个 ERT 覆盖"对 pending 标签发命令"。
+### C1 ✅ 延迟标签的命令路径有测试兜底
+`chromel--command` 先在 raw-JS 开关上做判定、再 `chromel--ensure-browser`，最后才要求 `chromel--id`。新增两条 ERT：`chromel-command-materializes-a-deferred-tab-first`（断言调用顺序是 ensure → native，且 native 收到新建的 id）与 `chromel-command-refuses-a-tab-that-stayed-deferred`（仍 pending 时 `user-error`）。
 
 ### C2 ✅ 搜索引擎写死 DuckDuckGo
 新增 `defcustom chromel-search-url`（默认 `https://duckduckgo.com/?q=%s`，要求含 `%s`），`chromel--normalize-url` 用 `format` 套用，查询串仍走 `url-hexify-string`。ERT 增加 3 条：默认模板、`%` 转义（`100%25`）、自定义模板生效；29/29 通过。
 > 顺带发现：仓库里的 `chromel.elc` 是未跟踪的构建产物，`load` 会优先加载它，改完 `chromel.el` 直接跑 ERT 会测到旧逻辑（本轮先踩了一次）。建议后续在测试脚本里强制 `load` 源文件或先删 `.elc`。
 
-### C3 弹窗丢失 `window.opener`
-`OnBeforePopup`/`OnOpenURLFromTab` 一律抑制并由 Emacs 开新标签，脚本弹窗拿不到 opener。**做法**：至少写进 README 的"已知限制"；要支持则区分"用户手势链接"与"脚本 window.open"。
+### C3 ✅ 已知限制已写入 README
+行为未改（仍由 Emacs 开新标签），但 README「数据和能力边界」明确写出：页面发起的新窗口转成新的 Emacs buffer，`window.opener` 关系不保留，依赖脚本弹窗通信的登录流程可能不兼容。要真正支持需要区分「用户手势链接」与「脚本 window.open」，属于行为改造，不在此轮范围。
 
 ### C4 hints 标签依赖可见数量
 `gui-hints` 曾因可见链接从 6 降到 2、标签退化成单字母而超时。**做法**：`test/gui-hints.el` 不假设标签长度/数量（按 `hints` 返回的 label 逐个敲），或固定窗口尺寸后断言完整列表。
 
-### C5 打开过设置窗口后定时器不再空闲
-`chromel--settings-open` 故意永不重置（native 拥有窗口生命周期），所以泵保持 50 Hz。**做法**：native 增加"是否还有任何 browser"查询（P2b），Elisp 用它决定是否停泵。
+### C5 ✅ 泵的空闲判定改问 native
+`chromel_core.h` 新增 `int browser_count();`（只读 `browsers` + `settingsBrowsers`，**不**经 `requireReady`，CEF 未初始化时返回 0）；模块导出 `chromel--native-browser-count`；Elisp 新增 `chromel--native-has-browsers-p`，`chromel--pump-needed-p` 用它取代原先永不重置的 `chromel--settings-open`（该变量已删除）。`chromel-settings` 改为「先发 settings 命令、再 `chromel--ensure-timer`」，因为窗口是在那条命令里同步创建的。API 版本随之升到 2。ERT 新增 2 条并更新 2 条（无页面/无浏览器时停泵、设置窗口存在时继续泵、模块未加载时不问 native）。
 
 ## D. 文档
 

@@ -419,32 +419,71 @@
   (should-not (eq (lookup-key chromel-actions-map (kbd "s")) #'chromel-extension-store)))
 
 (ert-deftest chromel-pump-idles-without-browsers ()
+  "No pages and no native browser means the 20 ms pump can stop."
   (let ((chromel--pages (make-hash-table :test #'eq))
-        (chromel--settings-open nil))
-    (should-not (chromel--pump-needed-p))
-    (puthash 1 nil chromel--pages)
-    (should (chromel--pump-needed-p)))
-  (let ((chromel--pages (make-hash-table :test #'eq))
-        (chromel--settings-open t))
-    (should (chromel--pump-needed-p))))
+        (chromel--tabs nil)
+        (chromel--module-loaded t))
+    (cl-letf (((symbol-function 'chromel--native-browser-count) (lambda () 0)))
+      (should-not (chromel--pump-needed-p))
+      (puthash 1 nil chromel--pages)
+      (should (chromel--pump-needed-p)))
+    ;; A settings window is a browser the page table does not know about.
+    (let ((chromel--pages (make-hash-table :test #'eq)))
+      (cl-letf (((symbol-function 'chromel--native-browser-count) (lambda () 1)))
+        (should (chromel--native-has-browsers-p))
+        (should (chromel--pump-needed-p))))))
+
+(ert-deftest chromel-pump-ignores-native-count-before-module-load ()
+  (let ((chromel--module-loaded nil))
+    (should-not (chromel--native-has-browsers-p))))
+
+(ert-deftest chromel-command-materializes-a-deferred-tab-first ()
+  "A pending tab has no browser yet; the command must create it before use."
+  (with-temp-buffer
+    (setq-local chromel--pending t)
+    (let (calls)
+      (cl-letf (((symbol-function 'chromel--ensure-browser)
+                 (lambda () (push 'ensure calls)
+                   (setq-local chromel--pending nil)
+                   (setq-local chromel--id 42)))
+                ((symbol-function 'chromel--native-command)
+                 (lambda (&rest args) (push (cons 'native args) calls))))
+        (chromel--command "navigate" "https://example.org/")
+        (should (equal (nreverse (mapcar (lambda (c) (if (consp c) (car c) c)) calls))
+                       '(ensure native)))
+        (should (equal (cdr (car calls)) '(42 "navigate" "https://example.org/")))))))
+
+(ert-deftest chromel-command-refuses-a-tab-that-stayed-deferred ()
+  (with-temp-buffer
+    (setq-local chromel--pending t)
+    (cl-letf (((symbol-function 'chromel--ensure-browser) #'ignore))
+      (should-error (chromel--command "reload") :type 'user-error))))
 
 (ert-deftest chromel-tick-keeps-pumping-during-close-grace-period ()
   "Browsers close asynchronously, so the pump must survive an empty page list."
   (let ((chromel--pages (make-hash-table :test #'eq))
         (chromel--tabs nil)
-        (chromel--settings-open nil)
+        (chromel--module-loaded t)
         (chromel--idle-since nil)
         (chromel--initialized t)
         (chromel--shutting-down nil)
         (chromel--timer (run-at-time 3600 nil #'ignore)))
     (cl-letf (((symbol-function 'chromel--native-pump) #'ignore)
               ((symbol-function 'chromel--native-events) (lambda () "[]"))
+              ((symbol-function 'chromel--native-browser-count) (lambda () 0))
               ((symbol-function 'chromel--sync) #'ignore))
       (chromel--tick)
       (should (timerp chromel--timer))
       (setq chromel--idle-since (time-subtract (current-time) 3))
       (chromel--tick)
       (should-not (timerp chromel--timer)))))
+
+(ert-deftest chromel-browser-count-is-safe-before-cef ()
+  "The pump asks for the count before CEF is up, so it must not require CEF."
+  (skip-unless (file-exists-p chromel-native-module))
+  (skip-unless (not chromel--initialized))
+  (chromel--ensure-module)
+  (should (eql 0 (chromel--native-browser-count))))
 
 (ert-deftest chromel-module-api-matches-elisp ()
   "The built dylib must report the API this file was written against."

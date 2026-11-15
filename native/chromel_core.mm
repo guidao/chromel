@@ -756,6 +756,11 @@ long bind_window(const std::string& title) {
 }
 
 int api_version() { return kChromelApiVersion; }
+// Reads the bookkeeping maps only, so Elisp can ask "is anything still alive?"
+// before CEF is up (and while it is shutting down) without tripping requireReady.
+int browser_count() {
+  return static_cast<int>(browsers.size() + settingsBrowsers.size());
+}
 
 bool is_settings_url(const std::string& url) { return isSettingsURL(url); }
 
@@ -1076,6 +1081,8 @@ void pump() {
 }
 std::string events() {
   requireReady();
+  // An idle tick has nothing to report; skip the JSON round trip entirely.
+  if (queue.count == 0) return "[]";
   NSData* data = [NSJSONSerialization dataWithJSONObject:queue options:0 error:nil];
   [queue removeAllObjects];
   if (!data) return "[]";

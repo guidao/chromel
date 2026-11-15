@@ -112,7 +112,9 @@ void OnScheduleMessagePumpWork(int64_t) override {}
 
 好处：CEF 的每一步都发生在 Emacs 主线程的已知位置，不会被 CEF 的嵌套循环卡住；调试时 `M-x chromel-diagnostics` 能看到泵的状态。代价：CEF 的定时器精度受 20 ms 限制（视频播放、动画仍由渲染进程自己跑，不受影响）。
 
-**空闲策略**：没有页面、没有 deferred 标签、没有设置窗口时，泵会先运行 2 秒宽限期再停（等 CEF 异步关闭浏览器），之后定时器置 nil；新建页面时 `chromel--ensure-timer` 重新起泵。
+**空闲策略**：没有页面、没有 deferred 标签、也没有任何 CEF browser 时，泵会先运行 2 秒宽限期再停（等 CEF 异步关闭浏览器），之后定时器置 nil；新建页面时 `chromel--ensure-timer` 重新起泵。
+
+「还有没有 browser」由 native 回答（`chromel--native-browser-count`，只读 `browsers` + `settingsBrowsers`，不启动 CEF），因为设置窗口的 browser 不在 `chromel--pages` 里。Elisp 侧不再维护「设置窗口可能还开着」的猜测标志。
 
 ### 4.2 视图嵌入：一个隐藏容器 + 坐标系换算
 
@@ -414,6 +416,7 @@ GUI 套件共 19 个脚本，覆盖渲染、几何、焦点、滚动、会话、
 | page | 一个 `CefBrowser` + 一个 Emacs buffer，即"标签" |
 | container | 承载 CEF 视图的 `NSView`，由 Emacs 窗口几何决定位置 |
 | pump | 一次 `CefDoMessageLoopWork()`，由 20 ms 定时器驱动 |
+| browser count | native 侧 `browsers` + `settingsBrowsers` 的数量，用来判断泵是否还需要运行 |
 | selected | 当前接收键盘的页面（Emacs window 选中且无 minibuffer 激活） |
 | ownsFocus | 页面被选中且没有输入控件在编辑，此时 j/k 表示滚动 |
 | settings window | `chrome://settings` 等受管页面的独立顶层窗口 |

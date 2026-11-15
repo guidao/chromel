@@ -92,6 +92,7 @@ Held j/k use `chromel-scroll-speed` after the initial step."
 (declare-function chromel--native-shutdown "chromel-module" ())
 (declare-function chromel--native-info "chromel-module" ())
 (declare-function chromel--native-inspect "chromel-module" (id))
+(declare-function chromel--native-browser-count "chromel-module" ())
 
 (defvar chromel--initialized nil)
 (defvar chromel--timer nil)
@@ -118,11 +119,9 @@ Held j/k use `chromel-scroll-speed` after the initial step."
   "Start of the grace period before the pump is allowed to stop.
 CEF closes browsers asynchronously, so `chromel--pages' empties before the
 native side has finished tearing them down; pumping must continue until then.")
-(defvar chromel--settings-open nil
-  "Non-nil once a Chromium settings window was opened in this session.
-Settings pages are CEF browsers that are not tracked in `chromel--pages', so
-the pump has to keep running while one may still be alive.  It is deliberately
-never reset: the native side owns the window's lifetime.")
+(defvar chromel--module-loaded nil
+  "Non-nil once the dynamic module is present in this Emacs process.")
+
 (defvar-local chromel--id nil)
 (defvar-local chromel--pending nil)
 (defvar-local chromel--activation-error nil)
@@ -343,10 +342,20 @@ never reset: the native side owns the window's lifetime.")
         (when (member type '("title" "url")) (chromel--session-changed))
         (force-mode-line-update)))))
 
+(defun chromel--native-has-browsers-p ()
+  "Return non-nil when CEF still owns a browser.
+Settings windows are CEF browsers too, and they are not tracked in
+`chromel--pages', so only the native side can answer whether the pump is
+still needed.  Nil before the module is loaded and while CEF is down."
+  (and chromel--module-loaded
+       (fboundp 'chromel--native-browser-count)
+       (let ((count (chromel--native-browser-count)))
+         (and (integerp count) (> count 0)))))
+
 (defun chromel--pump-needed-p ()
   "Return non-nil when CEF or a deferred tab still needs a sync pass."
   (or (> (hash-table-count chromel--pages) 0)
-      chromel--settings-open
+      (chromel--native-has-browsers-p)
       ;; A deferred tab materializes during `chromel--sync', which the pump
       ;; drives: without the timer it would wait forever for a keypress.
       (cl-some (lambda (buffer)
@@ -558,13 +567,15 @@ not create a browser tab."
   (when (and url (not (chromel--settings-url-p url)))
     (user-error "Expected a Chromium management or Chrome Web Store URL"))
   (chromel--start)
-  (setq chromel--settings-open t)
-  (chromel--ensure-timer)
+  ;; The window is created synchronously by this call, so start the pump after
+  ;; it: `chromel--pump-needed-p' asks the native side how many browsers exist,
+  ;; which makes the timer stop again once the window is closed.
   (chromel--native-command 0 "settings"
                        (if url
                            (replace-regexp-in-string
                             "\\`[^/?#]+://[^/?#]+" #'downcase url t t)
-                         "")))
+                         ""))
+  (chromel--ensure-timer))
 
 ;;;###autoload
 (defun chromel-passwords ()
@@ -584,13 +595,10 @@ not create a browser tab."
   (interactive)
   (chromel-settings "https://chromewebstore.google.com/"))
 
-(defvar chromel--module-loaded nil
-  "Non-nil once the dynamic module is present in this Emacs process.")
-
 (declare-function chromel--native-is-settings-url "chromel-module" (url))
 (declare-function chromel--native-api-version "chromel-module" ())
 
-(defconst chromel-module-api-version 1
+(defconst chromel-module-api-version 2
   "API version this file expects from `chromel-native-module'.
 Bump together with `chromel::kChromelApiVersion' whenever a
 `chromel--native-*' signature or meaning changes.")
