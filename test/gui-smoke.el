@@ -62,7 +62,13 @@
           ('reparented
            (chromel-test--assert (eq (window-frame chromel--window) chromel-test--second-frame)
                              "View did not follow its buffer to the second frame")
-           (delete-frame chromel-test--second-frame)
+           ;; Hide the frame instead of deleting it: once AppKit has handed the
+           ;; new window to the input-method system, `delete-frame' aborts in
+           ;; Emacs 31.1 on macOS (SIGSEGV in -[EmacsView selectedRange] reached
+           ;; from handleTSMEvent).  Reproduced with `emacs -Q' and no Chromel at
+           ;; all, so it is not this plugin's bug; hiding exercises the same
+           ;; reparenting teardown without touching it.
+           (make-frame-invisible chromel-test--second-frame)
            (select-frame-set-input-focus chromel-test--original-frame)
            (switch-to-buffer chromel-test--buffer)
            (chromel--sync)
