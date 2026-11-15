@@ -37,6 +37,7 @@
 - 新增 CI：Homebrew Emacs 跑 ERT；另一作业缓存 CEF、全量构建、拒绝编译警告、校验模块 API 版本。
 - Elisp≠模块的 API 版本不一致时 `chromel--ensure-module` 直接报错并提示重新构建（当前 API = 2）。
 - `gui-smoke` 不再删除第二个 frame，改为隐藏：AppKit 已把该窗口交给输入法之后，`delete-frame` 会在 Emacs 31.1/macOS 上 abort（`-[EmacsView selectedRange]` 经 `handleTSMEvent`），用 `emacs -Q` 去掉 Chromel 也能复现，属 Emacs 自身的问题。
+- CI：`elisp` 作业改到 `ubuntu-latest`（`emacs-nox`），依赖原生模块的 5 条 ERT 用 `chromel-test--module-available-p` 跳过，其余在 Linux 上照跑；`native` 作业因托管 macOS runner 不可用改为手动触发。
 - 提醒：`.elc` 已被 `.gitignore` 忽略，但它只要还在磁盘上就会被 `load` 优先加载——改了 `.el` 却测到旧逻辑（本轮亲历：API 版本升到 2 后 ERT 仍报 `(eql 2 1)`）。测试前先删 `chromel.elc`。
 
 ### 文档

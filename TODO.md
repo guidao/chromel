@@ -21,9 +21,11 @@
 **做法**：所有 GUI 脚本统一在开头设固定尺寸（并在退出时还原）。
 **验收**：在两种显示器/缩放设置下结果一致。
 
-### A3 ✅ CI 工作流已加（首次运行待观察）
-`.github/workflows/ci.yml` 两个作业：`elisp`（Homebrew Emacs + ERT）、`native`（缓存 `.deps`、`build.sh`、拒绝编译警告、校验 `chromel--native-api-version`、带 dylib 再跑 ERT）。GUI 脚本需要显示器，未纳入；后续可加 nightly。
-**现状**：macos-14 在本仓库报 `configuration 'macos-14-arm64-us-default' is not supported`，已改 `macos-13`；运行长时间排队，尚未拿到首个绿灯。
+### A3 ✅ CI 已拿到绿灯（Linux 跑 ERT，macOS 手动跑原生）
+`.github/workflows/ci.yml` 两个作业：
+- `elisp`：`ubuntu-latest` + `emacs-nox`，删除任何 `*.elc` 后跑 ERT。**已绿灯**（run 43669553594，提交 `f261ec2`）。ERT 里依赖原生模块的 5 条用 `chromel-test--module-available-p` 跳过，其余 30 条在 Linux 上全跑。
+- `native`：macOS，缓存 `.deps`、`build.sh`、拒绝编译警告、校验 `chromel--native-api-version`、带 dylib 再跑 ERT。因为托管 macOS runner 不可用（`macos-14` 报 `configuration 'macos-14-arm64-us-default' is not supported`；`macos-13` 排队到 24 小时被取消），已改为 `if: github.event_name == 'workflow_dispatch'`，只在手动触发时跑。
+GUI 脚本需要显示器与会话，未纳入 CI。
 
 ### A4 ✅ CEF 下载的架构判断
 原先 `platform.machine()` 在 Rosetta 下返回 `x86_64`，会下载 `macosx64` 而让 arm64 Emacs 加载失败。已改为 `host_arch()`：先读 `sysctl -n hw.optional.arm64`，再回退 `platform.machine()` 映射。`python3 scripts/fetch-cef.py --arch` 可直接自检（本机输出 `macosarm64`）。
