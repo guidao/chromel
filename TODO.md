@@ -10,6 +10,12 @@
 - **P2 交互/性能**：`s` 归还页内搜索、Web Store 移到 `E`（README 与 meow 测试同步）；50 Hz 定时器按需启停（2 秒关停宽限期）；`selected`/layout 变更去重。
 - **测试真因**：cmd+click 开新标签改用同窗切换（原先 `pop-to-buffer` 拆 frame，导致 `gui-hints` 只有半屏、标签退化成单字母）；`gui-features` 点击坐标避开视口右侧 16 px 不可命中带；test mode 关闭 Chromium 后台/遮挡节流；合成 Escape 先激活 App 再投递并重试。
 
+## 工作流
+
+- `master` 始终保持绿灯；每项待办开一条 `topic/<短横线-slug>` 分支（例：`topic/devtools-client`），开 PR，CI 绿了再合。CI 的 `pull_request` 触发器就是为这条准备的。
+- 只改 Elisp/文档/脚本的 PR：Linux 上的 ERT 就够。
+- 改 `native/` 的 PR：描述里附 `./scripts/build.sh` 的零警告证据，并在本机跑 `CHROMEL_TEST_ONLY=<相关脚本> python3 scripts/test-gui.py`，因为 GUI 脚本不进 CI。
+
 ## A. 工程护栏（建议优先）
 
 ### A1 ✅ 测试可能跑旧 dylib（已修，`scripts/test-gui.py:16-27`）
